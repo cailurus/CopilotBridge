@@ -1,126 +1,76 @@
 # Copilot Bridge
 
-**Use the GitHub Copilot subscription you already pay for as a local backend for Codex, Codex CLI, and Claude Code — as a native macOS menu-bar app. No VS Code required.**
+A small macOS menu-bar app that lets local coding tools use the GitHub Copilot
+subscription you already have.
 
-Copilot Bridge is a small, native Swift/SwiftUI app inspired by
-[`copilot-reverse`](https://github.com/wangcansunking/copilot-reverse) and
-[`agent-maestro`](https://github.com/Joouis/agent-maestro). It runs a local
-OpenAI/Anthropic-compatible proxy in front of GitHub Copilot's models and writes
-system-level config "profiles" so your CLI tools talk to it instead of the
-official APIs.
+Copilot Bridge starts a local proxy, signs in with GitHub, and can write simple
+profiles for tools like Codex, Codex CLI, and Claude Code.
 
-> **Disclaimer:** The GitHub Copilot integration uses community-documented,
-> unofficial endpoints, for use with **your own Copilot subscription only**. It
-> may break if GitHub changes these endpoints.
-
-## Highlights
-
-- **Menu-bar resident.** A single status icon with sign-in, start/stop, and quick
-  profile switching. Everything advanced lives in Settings.
-- **No VS Code.** Signs in with GitHub device-code OAuth and calls Copilot's HTTP
-  endpoints directly — exactly like `copilot-reverse` (the `agent-maestro`
-  approach requires VS Code's Language Model API).
-- **System profiles.** Configure Codex, Codex CLI, and Claude Code from Settings.
-  Each profile maps a client to a Copilot model and applies it to the client's
-  own config file.
-- **Native + light.** Pure Swift, zero third-party dependencies. The HTTP server
-  is built on `Network.framework`; the token is stored in the Keychain.
-- **Safe writes.** Every config file is backed up (timestamped) before it's
-  modified, and unrelated keys in your configs are preserved.
+> This project uses unofficial GitHub Copilot endpoints. Use it only with your
+> own Copilot subscription. The integration may need updates if GitHub changes
+> those endpoints.
 
 ## Requirements
 
-- macOS 14+ (built and tested on macOS 26, Apple Silicon)
-- Xcode / Swift 6 toolchain (`swift --version`)
+- macOS 14+
+- Xcode / Swift 6 toolchain
 - An active GitHub Copilot subscription
 
-## Build & run
+## Build
 
 ```bash
-# Build a signed .app bundle into ./dist
 ./scripts/build-app.sh release
-
-# Launch it (also double-clickable in Finder)
 open dist/CopilotBridge.app
 ```
 
-For iterating on the code:
+For development:
 
 ```bash
-swift build          # debug build
-swift run            # run the executable directly
+swift build
+swift run
 ```
 
-## Usage
+## Use
 
-1. Launch the app — a ⚡︎ icon appears in the menu bar (no Dock icon).
-2. Click it → **Sign in to GitHub**. A browser opens; paste the shown device code.
-3. The proxy starts on `http://127.0.0.1:10086` (configurable).
-4. Open **Settings → Profiles → Add**, pick a client + Copilot model, then **Apply**.
-5. Open a new terminal and run your client (`codex`, `claude`, …). It's now
-   talking to Copilot through the bridge.
+1. Launch `CopilotBridge.app`.
+2. Click the menu-bar icon.
+3. Sign in to GitHub and enter the device code in the browser.
+4. Open Settings, add a profile for your tool, then apply it.
+5. Start your coding tool in a new terminal.
 
-### Local endpoints
+The default local server is:
 
-- OpenAI-compatible: `http://127.0.0.1:10086/openai` (chat + `/openai/responses`)
-- Anthropic-compatible: `http://127.0.0.1:10086/anthropic`
+- OpenAI-style endpoint: `http://127.0.0.1:10086/openai`
+- Anthropic-style endpoint: `http://127.0.0.1:10086/anthropic`
 
-Any API key value works locally. Example for Claude Code without a profile:
+## Profiles
 
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:10086/anthropic
-export ANTHROPIC_API_KEY=local
-claude
+Profiles write the local configuration needed by each tool:
+
+- Codex / Codex CLI: `~/.codex/config.toml`
+- Claude Code: `~/.claude/settings.json`
+
+Before changing a config file, Copilot Bridge creates a backup under:
+
+```text
+~/Library/Application Support/CopilotBridge/backups/
 ```
 
-## Profiles → what gets written
-
-| Client | File | What Copilot Bridge writes |
-|---|---|---|
-| Codex / Codex CLI | `~/.codex/config.toml` | A managed `[model_providers.copilot-bridge]` block (`base_url=…/openai`, `wire_api="responses"`), plus `model` / `model_provider` / `model_context_window`. Your other keys and tables are preserved. |
-| Claude Code | `~/.claude/settings.json` | An `env` block: `ANTHROPIC_BASE_URL=…/anthropic`, `ANTHROPIC_MODEL` (with `[1m]` suffix for 1M models), auto-compaction hints. Your other `env` keys are preserved. |
-
-**Revert** restores the file by removing only the keys/blocks Copilot Bridge added.
-Timestamped backups are kept under
-`~/Library/Application Support/CopilotBridge/backups/`.
+You can revert an applied profile from the app.
 
 ## Settings
 
-- **Network:** proxy port (default `10086`) and **Accessible from** — either
-  *This Mac only* (`127.0.0.1`) or *Local network* (`0.0.0.0`, reachable from
-  other devices, requires an access key for remote clients).
-- **Startup:** auto-start the proxy on launch; launch the app at login
-  (`SMAppService`).
-- **Profiles:** create / apply / revert / delete per-client profiles.
+The app lets you configure:
 
-## Architecture
+- Proxy port
+- Local-only or LAN access
+- Optional access key for LAN clients
+- Auto-start on launch
+- Launch at login
+- Profiles per client
 
-```
-Codex / Codex CLI / Claude Code
-        │  (localhost HTTP)
-        ▼
-Copilot Bridge  (menu-bar app)
-  ├─ HTTPServer         Network.framework listener
-  ├─ ProxyEngine        routes /openai + /anthropic, resolves models
-  ├─ AnthropicTranslate Anthropic ⇆ OpenAI chat (+ streaming SSE)
-  ├─ CopilotUpstream    calls api.githubcopilot.com with editor headers
-  ├─ CopilotAuth        GitHub device-code OAuth → Copilot token (Keychain)
-  └─ ConfigWriter       writes/reverts ~/.codex + ~/.claude, with backups
-        │
-        ▼
-GitHub Copilot (chat/completions + responses)
-```
+## Notes
 
-- **Codex / Codex CLI** speak the OpenAI **Responses** API, which Copilot serves
-  directly for gpt-5-class models — the bridge forwards these with light shaping.
-- **Claude Code** speaks Anthropic Messages, which the bridge translates to
-  Copilot's OpenAI chat endpoint in both directions (including streaming).
-
-## Notes & limitations
-
-- This is a focused proxy, not a full re-implementation of `copilot-reverse`'s
-  translation layer. Text, multi-turn, system prompts, tools/tool-use, images,
-  reasoning-effort, and streaming are handled; some exotic edge cases (e.g.
-  inline-XML tool recovery, image round-trips on the Responses path) are not.
-- Model discovery, 1M-context handling, and per-model context windows follow the
-  live Copilot `/models` catalog.
+GitHub login tokens are stored in the macOS Keychain. During development, rebuilt
+apps may ask for Keychain permission again because ad-hoc signing changes the
+app identity.

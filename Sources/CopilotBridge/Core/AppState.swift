@@ -53,9 +53,11 @@ final class AppState: ObservableObject {
     func onLaunch() {
         guard !didLaunch else { return }
         didLaunch = true
-        Task { await verifyLogin() }
-        if settings.autoStartProxy, Keychain.load() != nil {
-            startProxy()
+        Task {
+            let signedIn = await verifyLogin()
+            if signedIn, settings.autoStartProxy {
+                startProxy()
+            }
         }
     }
 
@@ -69,18 +71,27 @@ final class AppState: ObservableObject {
 
     // MARK: Auth
 
-    func verifyLogin() async {
+    @discardableResult
+    func verifyLogin() async -> Bool {
         guard Keychain.load() != nil else {
             loginStatus = .signedOut
-            return
+            availableModels = []
+            stopProxyIfNeeded(activity: nil)
+            return false
         }
         loginStatus = .checking
         do {
             _ = try await tokens.get()
             loginStatus = .signedIn
             await refreshModels()
+            return true
         } catch {
+            await tokens.invalidate()
             loginStatus = .signedOut
+            availableModels = []
+            lastActivity = "Login check failed: \(error.localizedDescription)"
+            stopProxyIfNeeded(activity: lastActivity)
+            return false
         }
     }
 
@@ -98,12 +109,14 @@ final class AppState: ObservableObject {
                     intervalMs: max(device.interval, 5) * 1000)
                 Keychain.save(ghToken)
                 await tokens.invalidate()
-                await verifyLogin()
-                if settings.autoStartProxy { startProxy() }
+                let signedIn = await verifyLogin()
+                if signedIn, settings.autoStartProxy { startProxy() }
             } catch {
                 if !Task.isCancelled {
                     loginStatus = .signedOut
+                    availableModels = []
                     lastActivity = "Login failed: \(error.localizedDescription)"
+                    stopProxyIfNeeded(activity: lastActivity)
                 }
             }
         }
@@ -124,6 +137,11 @@ final class AppState: ObservableObject {
     // MARK: Proxy
 
     func startProxy() {
+        guard loginStatus == .signedIn else {
+            proxyStatus = .stopped
+            lastActivity = "Sign in to GitHub before starting the proxy"
+            return
+        }
         guard server == nil else { return }
         let engine = ProxyEngine(
             upstream: upstream,
@@ -156,6 +174,17 @@ final class AppState: ObservableObject {
         lastActivity = "Proxy stopped"
         requestCount = 0
         lastError = nil
+    }
+
+    private func stopProxyIfNeeded(activity: String? = "Proxy stopped") {
+        guard server != nil else {
+            proxyStatus = .stopped
+            return
+        }
+        stopProxy()
+        if let activity {
+            lastActivity = activity
+        }
     }
 
     func restartProxy() {
