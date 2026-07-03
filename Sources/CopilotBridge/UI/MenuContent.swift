@@ -3,8 +3,9 @@ import SwiftUI
 /// The menu-bar dropdown. Compact status + primary actions; deep config in Settings.
 struct MenuContent: View {
     @EnvironmentObject var state: AppState
-    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @State private var copiedLoginCode = false
+    @State private var pulseStatusLight = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -31,7 +32,6 @@ struct MenuContent: View {
             Text("Copilot Bridge").font(.headline)
             Spacer()
             headerProxyControl
-            Circle().fill(proxyColor).frame(width: 8, height: 8)
         }
     }
 
@@ -48,7 +48,7 @@ struct MenuContent: View {
             row("Endpoint", state.baseURLSummary)
             row("Proxy", proxyText)
         }
-        .font(.caption)
+        .font(.system(size: 13))
     }
 
     private var proxyText: String {
@@ -130,18 +130,21 @@ struct MenuContent: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             authFooterControl
             Spacer()
-            footerIconButton("gearshape", label: "Settings") {
-                NSApp.activate(ignoringOtherApps: true)
-                openSettings()
-            }
-            footerIconButton("power", label: "Quit") {
-                NSApp.terminate(nil)
+            HStack(spacing: 2) {
+                footerIconButton("gearshape", label: "Settings") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "preferences")
+                }
+                footerIconButton("power", label: "Quit") {
+                    NSApp.terminate(nil)
+                }
             }
         }
-        .font(.caption)
+        .font(.system(size: 13, weight: .medium))
+        .frame(height: 30)
     }
 
     private func footerIconButton(
@@ -151,8 +154,8 @@ struct MenuContent: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 15, weight: .medium))
-                .frame(width: 28, height: 24)
+                .font(.system(size: 14, weight: .medium))
+                .frame(width: 24, height: 30)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
@@ -169,8 +172,15 @@ struct MenuContent: View {
             } label: {
                 Label("Sign in to GitHub", systemImage: "person.crop.circle.badge.plus")
             }
+            .frame(height: 30)
         case .checking:
-            Label("Checking login…", systemImage: "hourglass")
+            HStack(spacing: 7) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+                Text("Checking login…")
+            }
+            .frame(height: 30)
                 .foregroundStyle(.secondary)
         case .pending(let code, let url):
             pendingLoginControl(code: code, url: url)
@@ -180,6 +190,7 @@ struct MenuContent: View {
             } label: {
                 Label("Sign out of GitHub", systemImage: "person.crop.circle.badge.minus")
             }
+            .frame(height: 30)
         }
     }
 
@@ -196,8 +207,8 @@ struct MenuContent: View {
                 copyLoginCode(code)
             } label: {
                 Image(systemName: copiedLoginCode ? "checkmark.circle.fill" : "doc.on.doc")
-                    .font(.system(size: 15, weight: .medium))
-                    .frame(width: 28, height: 24)
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 34, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
@@ -220,9 +231,34 @@ struct MenuContent: View {
 
     private func row(_ label: String, _ value: String) -> some View {
         HStack(alignment: .top) {
-            Text(label).foregroundStyle(.secondary)
+            Text(label).foregroundStyle(.primary)
             Spacer()
-            Text(value).multilineTextAlignment(.trailing).lineLimit(1)
+            if label == "Proxy" {
+                HStack(spacing: 6) {
+                    breathingStatusLight
+                    Text(value)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            } else {
+                Text(value)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(1)
+            }
         }
+    }
+
+    private var breathingStatusLight: some View {
+        Circle()
+            .fill(proxyColor)
+            .frame(width: 8, height: 8)
+            .scaleEffect(pulseStatusLight ? 1.18 : 0.82)
+            .opacity(pulseStatusLight ? 0.55 : 1)
+            .animation(
+                .easeInOut(duration: 1.25).repeatForever(autoreverses: true),
+                value: pulseStatusLight
+            )
+            .onAppear { pulseStatusLight = true }
     }
 }

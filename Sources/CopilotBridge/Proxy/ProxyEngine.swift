@@ -41,16 +41,8 @@ actor ProxyEngine {
 
     /// Maps a requested (possibly canonical/[1m]-suffixed) id to a real Copilot id.
     private func resolveModel(_ requested: String) async -> String {
-        var id = requested
-        if id.hasSuffix("[1m]") { id = String(id.dropLast(4)) }
         let models = await upstream.models()
-        let ids = models.map(\.id)
-        if ids.contains(id) { return id }
-        // Canonical dashed -> dotted (claude-opus-4-8 -> claude-opus-4.8) and fuzzy contains.
-        let dotted = id.replacingOccurrences(of: "-", with: ".")
-        if let hit = ids.first(where: { $0 == dotted }) { return hit }
-        if let hit = ids.first(where: { $0.contains(id) || id.contains($0) }) { return hit }
-        return id
+        return CopilotModelID.resolve(requested, in: models)
     }
 
     // MARK: Routing
@@ -87,13 +79,31 @@ actor ProxyEngine {
 
     private func listModels() async -> HTTPServer.Response {
         let models = await upstream.models()
-        let data = models.map { ["id": $0.id, "object": "model", "owned_by": "copilot-bridge"] }
+        let data = models.map { model in
+            var item: [String: Any] = [
+                "id": model.displayID,
+                "object": "model",
+                "owned_by": model.vendor ?? "copilot-bridge",
+                "display_name": model.name ?? model.displayID,
+                "upstream_id": model.id,
+                "supported_endpoints": model.supportedEndpointNames,
+            ]
+            if model.claudeModelID != model.displayID || model.displayID.hasPrefix("claude-") {
+                item["claude_model_id"] = model.claudeModelID
+            }
+            if let contextWindow = model.contextWindow {
+                item["capabilities"] = [
+                    "limits": ["max_context_window_tokens": contextWindow],
+                ]
+            }
+            return item
+        }
         return .json(200, ["object": "list", "data": data])
     }
 
     private func listAnthropicModels() async -> HTTPServer.Response {
-        let models = await upstream.models().filter { $0.id.contains("claude") }
-        let data = models.map { ["type": "model", "id": $0.id, "display_name": $0.id] }
+        let models = await upstream.models().filter { $0.displayID.contains("claude") }
+        let data = models.map { ["type": "model", "id": $0.claudeModelID, "display_name": $0.name ?? $0.claudeModelID] }
         return .json(200, ["data": data])
     }
 
@@ -196,9 +206,22 @@ actor ProxyEngine {
             return .json(400, ["error": ["message": "invalid JSON body"]])
         }
         let requested = anthropic["model"] as? String ?? "claude-sonnet-4"
-        let model = await resolveModel(requested)
+        let selected = CopilotModelID.model(matching: requested, in: await upstream.models())
+        let model = selected?.id ?? CopilotModelID.strippedOneMSuffix(requested)
         tally(model)
-        let (openAIBody, stream) = AnthropicTranslate.toOpenAI(anthropic, resolvedModel: model)
+        let stream = anthropic["stream"] as? Bool ?? false
+        if selected?.supportsMessages == true {
+            var nativeBody = anthropic
+            nativeBody["model"] = model
+            guard let outBody = try? JSONSerialization.data(withJSONObject: nativeBody) else {
+                return .json(400, ["error": ["message": "encode failed"]])
+            }
+            let extraHeaders = nativeMessagesHeaders(req, payload: anthropic)
+            return await passthrough(outBody, stream: stream) {
+                try await self.upstream.messages(body: $0, extraHeaders: extraHeaders)
+            }
+        }
+        let (openAIBody, translatedStream) = AnthropicTranslate.toOpenAI(anthropic, resolvedModel: model)
         guard let outBody = try? JSONSerialization.data(withJSONObject: openAIBody) else {
             return .json(400, ["error": ["message": "encode failed"]])
         }
@@ -211,7 +234,7 @@ actor ProxyEngine {
                                           headers: ["Content-Type": "application/json"],
                                           body: text, stream: nil)
             }
-            if stream {
+            if translatedStream {
                 return anthropicStream(resp: resp, model: model)
             } else {
                 let data = await collect(resp.bytes)
@@ -250,6 +273,24 @@ actor ProxyEngine {
                 }
                 await writer.write(enc.finish())
             })
+    }
+
+    private func nativeMessagesHeaders(_ req: HTTPServer.Request, payload: [String: Any]) -> [String: String] {
+        var headers = ["X-Initiator": nativeMessagesInitiator(payload)]
+        if let beta = req.headers["anthropic-beta"], !beta.trimmingCharacters(in: .whitespaces).isEmpty {
+            headers["Anthropic-Beta"] = beta
+        }
+        return headers
+    }
+
+    private func nativeMessagesInitiator(_ payload: [String: Any]) -> String {
+        guard let messages = payload["messages"] as? [[String: Any]],
+              let last = messages.last,
+              last["role"] as? String == "user" else {
+            return "agent"
+        }
+        guard let blocks = last["content"] as? [[String: Any]] else { return "user" }
+        return blocks.contains { $0["type"] as? String != "tool_result" } ? "user" : "agent"
     }
 
     // MARK: helpers

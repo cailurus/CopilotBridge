@@ -23,6 +23,18 @@ profiles for tools like Codex, Codex CLI, and Claude Code.
 open dist/CopilotBridge.app
 ```
 
+If you have an Apple Developer certificate installed, the build script signs the
+app with it automatically. You can also choose one explicitly:
+
+```bash
+CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build-app.sh release
+```
+
+Developer ID signing gives the app a stable identity, so macOS Keychain is less
+likely to ask for GitHub token access again after every rebuild. To distribute
+the app to other Macs without Gatekeeper warnings, notarize the signed app with
+Apple after building.
+
 For development:
 
 ```bash
@@ -71,6 +83,6 @@ The app lets you configure:
 
 ## Notes
 
-GitHub login tokens are stored in the macOS Keychain. During development, rebuilt
-apps may ask for Keychain permission again because ad-hoc signing changes the
-app identity.
+GitHub login tokens are stored in the macOS Keychain. If the app is built with
+ad-hoc signing, rebuilt apps may ask for Keychain permission again because the
+app identity changes.

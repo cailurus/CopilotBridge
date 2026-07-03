@@ -30,20 +30,49 @@ final class AppState: ObservableObject {
     @Published private(set) var lastError: String?
     let activity = ActivityStore()
 
-    private let tokens: CopilotTokenStore
     private let upstream: CopilotUpstream
+    private let readGitHubToken: @Sendable () -> String?
+    private let getCopilotToken: @Sendable () async throws -> CopilotTokenStore.Token
+    private let invalidateCopilotToken: @Sendable () async -> Void
+    private let fetchAvailableModels: @Sendable (Bool) async -> [CopilotUpstream.ModelInfo]
+    private let forceFetchAvailableModels: @Sendable () async throws -> [CopilotUpstream.ModelInfo]
     private var engine: ProxyEngine?
     private var server: HTTPServer?
     private var loginTask: Task<Void, Never>?
+    private var modelRefreshTask: Task<Void, Never>?
     private var statsTimer: Timer?
 
-    init() {
-        let settings = SettingsStore.load()
-        self.settings = settings
+    convenience init() {
         let store = CopilotTokenStore(readGitHubToken: { Keychain.load() })
-        self.tokens = store
-        self.upstream = CopilotUpstream(tokens: store)
-        if Keychain.load() != nil {
+        let upstream = CopilotUpstream(tokens: store)
+        self.init(
+            settings: SettingsStore.load(),
+            readGitHubToken: { Keychain.load() },
+            getCopilotToken: { try await store.get() },
+            invalidateCopilotToken: { await store.invalidate() },
+            fetchAvailableModels: { forceRefresh in await upstream.models(forceRefresh: forceRefresh) },
+            forceFetchAvailableModels: { try await upstream.refreshModels() },
+            upstream: upstream
+        )
+    }
+
+    init(
+        settings: AppSettings,
+        readGitHubToken: @escaping @Sendable () -> String?,
+        getCopilotToken: @escaping @Sendable () async throws -> CopilotTokenStore.Token,
+        invalidateCopilotToken: @escaping @Sendable () async -> Void,
+        fetchAvailableModels: @escaping @Sendable (Bool) async -> [CopilotUpstream.ModelInfo],
+        forceFetchAvailableModels: @escaping @Sendable () async throws -> [CopilotUpstream.ModelInfo],
+        upstream: CopilotUpstream
+    ) {
+        self.settings = settings
+        self.readGitHubToken = readGitHubToken
+        self.getCopilotToken = getCopilotToken
+        self.invalidateCopilotToken = invalidateCopilotToken
+        self.fetchAvailableModels = fetchAvailableModels
+        self.forceFetchAvailableModels = forceFetchAvailableModels
+        self.upstream = upstream
+        if readGitHubToken() != nil {
             self.loginStatus = .checking
         }
     }
@@ -73,7 +102,7 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func verifyLogin() async -> Bool {
-        guard Keychain.load() != nil else {
+        guard readGitHubToken() != nil else {
             loginStatus = .signedOut
             availableModels = []
             stopProxyIfNeeded(activity: nil)
@@ -81,12 +110,12 @@ final class AppState: ObservableObject {
         }
         loginStatus = .checking
         do {
-            _ = try await tokens.get()
+            _ = try await getCopilotToken()
             loginStatus = .signedIn
-            await refreshModels()
+            refreshModelsInBackground()
             return true
         } catch {
-            await tokens.invalidate()
+            await invalidateCopilotToken()
             loginStatus = .signedOut
             availableModels = []
             lastActivity = "Login check failed: \(error.localizedDescription)"
@@ -108,7 +137,7 @@ final class AppState: ObservableObject {
                     deviceCode: device.deviceCode,
                     intervalMs: max(device.interval, 5) * 1000)
                 Keychain.save(ghToken)
-                await tokens.invalidate()
+                await invalidateCopilotToken()
                 let signedIn = await verifyLogin()
                 if signedIn, settings.autoStartProxy { startProxy() }
             } catch {
@@ -124,14 +153,29 @@ final class AppState: ObservableObject {
 
     func signOut() {
         loginTask?.cancel()
+        modelRefreshTask?.cancel()
         Keychain.clear()
-        Task { await tokens.invalidate() }
+        Task { await invalidateCopilotToken() }
         loginStatus = .signedOut
         stopProxy()
     }
 
-    func refreshModels() async {
-        availableModels = await upstream.models()
+    func refreshModels(forceRefresh: Bool = false) async {
+        availableModels = await fetchAvailableModels(forceRefresh)
+    }
+
+    func forceRefreshModels() async throws {
+        availableModels = try await forceFetchAvailableModels()
+    }
+
+    private func refreshModelsInBackground(forceRefresh: Bool = false) {
+        modelRefreshTask?.cancel()
+        modelRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            let models = await self.fetchAvailableModels(forceRefresh)
+            guard !Task.isCancelled else { return }
+            self.availableModels = models
+        }
     }
 
     // MARK: Proxy

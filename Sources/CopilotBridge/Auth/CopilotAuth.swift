@@ -92,22 +92,28 @@ enum CopilotAuth {
 private struct CopilotTokenResponse: Decodable {
     let token: String
     let expiresAt: Int
+    let endpoints: [String: String]?
     enum CodingKeys: String, CodingKey {
-        case token
+        case token, endpoints
         case expiresAt = "expires_at"
     }
 }
 
 /// Caches and refreshes the short-lived Copilot token derived from a GitHub token.
 actor CopilotTokenStore {
-    private var cached: (token: String, expiresAtMs: Double)?
+    struct Token: Sendable {
+        let value: String
+        let apiBaseURL: URL
+    }
+
+    private var cached: (token: Token, expiresAtMs: Double)?
     private let readGitHubToken: @Sendable () -> String?
 
     init(readGitHubToken: @escaping @Sendable () -> String?) {
         self.readGitHubToken = readGitHubToken
     }
 
-    func get() async throws -> String {
+    func get() async throws -> Token {
         let skewMs: Double = 60_000
         if let cached, cached.expiresAtMs - skewMs > Date().timeIntervalSince1970 * 1000 {
             return cached.token
@@ -122,8 +128,11 @@ actor CopilotTokenStore {
             throw CopilotAuth.AuthError.tokenExchangeFailed((resp as? HTTPURLResponse)?.statusCode ?? -1)
         }
         let decoded = try JSONDecoder().decode(CopilotTokenResponse.self, from: data)
-        cached = (decoded.token, Double(decoded.expiresAt) * 1000)
-        return decoded.token
+        let apiBase = decoded.endpoints?["api"].flatMap(URL.init(string:))
+            ?? URL(string: "https://api.githubcopilot.com")!
+        let token = Token(value: decoded.token, apiBaseURL: apiBase)
+        cached = (token, Double(decoded.expiresAt) * 1000)
+        return token
     }
 
     func invalidate() {

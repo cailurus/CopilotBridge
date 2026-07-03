@@ -4,11 +4,14 @@ import SwiftUI
 /// Claude Code) can have its own profiles; applying one writes that client's config
 /// file. Only one profile per client is active at a time.
 ///
-/// Uses the same Form/.formStyle(.grouped) container as General so both Settings
-/// tabs share one consistent width and layout.
+/// Uses compact profile sections plus a single model-refresh row so the tab reads
+/// like a settings panel instead of a long form.
 struct ProfilesSettingsView: View {
     @EnvironmentObject var state: AppState
     @State private var showingAdd = false
+    @State private var showingModels = false
+    @State private var isRefreshingModels = false
+    @State private var modelRefreshMessage: String?
     @State private var addClient: ClientKind = .codexCLI
 
     var body: some View {
@@ -16,29 +19,101 @@ struct ProfilesSettingsView: View {
             if state.loginStatus != .signedIn {
                 signInPrompt
             } else {
-                Form {
-                    ForEach(ClientKind.allCases) { client in
-                        ClientSection(client: client) { addClient = client; showingAdd = true }
-                    }
-
-                    Section {
-                        Button {
-                            Task { await state.refreshModels() }
-                        } label: {
-                            Label("Refresh model list", systemImage: "arrow.clockwise")
+                VStack(alignment: .leading, spacing: 12) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(ClientKind.allCases) { client in
+                                ClientSection(client: client) { addClient = client; showingAdd = true }
+                            }
+                            modelRefreshRow
                         }
-                    } footer: {
-                        Text("\(state.availableModels.count) Copilot models available.")
-                            .font(.caption).foregroundStyle(.secondary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 18)
+                        .padding(.bottom, 4)
                     }
                 }
-                .formStyle(.grouped)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .sheet(isPresented: $showingAdd) {
             AddProfileSheet(initialClient: addClient)
                 .environmentObject(state)
         }
+        .sheet(isPresented: $showingModels) {
+            ModelListSheet(models: state.availableModels)
+        }
+    }
+
+    private var modelRefreshRow: some View {
+        SettingsPanel("Models", systemImage: "cube.box") {
+            HStack(spacing: 10) {
+                Button {
+                    refreshModels()
+                } label: {
+                    HStack(spacing: 8) {
+                        if isRefreshingModels {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text(isRefreshingModels ? "Refreshing model list" : "Refresh model list")
+                    }
+                }
+                .disabled(isRefreshingModels)
+
+                Spacer()
+
+                Text(modelStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    showingModels = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .imageScale(.medium)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Show model details")
+                .disabled(state.availableModels.isEmpty)
+            }
+        }
+    }
+
+    private var modelStatusText: String {
+        modelRefreshMessage ?? "\(state.availableModels.count) Copilot models available"
+    }
+
+    private func refreshModels() {
+        guard !isRefreshingModels else { return }
+        isRefreshingModels = true
+        modelRefreshMessage = nil
+        Task {
+            let start = ContinuousClock.now
+            do {
+                try await state.forceRefreshModels()
+                let elapsed = start.duration(to: .now)
+                try? await Task.sleep(for: max(.zero, .milliseconds(800) - elapsed))
+                await MainActor.run {
+                    modelRefreshMessage = "\(state.availableModels.count) models refreshed in \(formatDuration(elapsed))"
+                    isRefreshingModels = false
+                }
+            } catch {
+                let elapsed = start.duration(to: .now)
+                try? await Task.sleep(for: max(.zero, .milliseconds(800) - elapsed))
+                await MainActor.run {
+                    modelRefreshMessage = error.localizedDescription
+                    isRefreshingModels = false
+                }
+            }
+        }
+    }
+
+    private func formatDuration(_ duration: Duration) -> String {
+        let seconds = Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) / 1_000_000_000_000_000_000
+        return String(format: "%.1fs", seconds)
     }
 
     private var signInPrompt: some View {
@@ -55,7 +130,82 @@ struct ProfilesSettingsView: View {
     }
 }
 
-/// One Section per client, listing its profiles with an inline add button in the header.
+struct ModelListSheet: View {
+    let models: [CopilotUpstream.ModelInfo]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Available models")
+                    .font(.title3.bold())
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            List {
+                ForEach(groupedModels, id: \.family) { group in
+                    Section(group.family) {
+                        ForEach(group.models, id: \.id) { model in
+                            modelRow(model)
+                        }
+                    }
+                }
+            }
+            .listStyle(.inset)
+        }
+        .padding(18)
+        .frame(width: 560, height: 460)
+    }
+
+    private var groupedModels: [(family: String, models: [CopilotUpstream.ModelInfo])] {
+        var buckets: [String: [CopilotUpstream.ModelInfo]] = [:]
+        for model in models {
+            buckets[ModelFamily.family(of: model), default: []].append(model)
+        }
+        return ModelFamily.order.compactMap { family in
+            guard let models = buckets[family], !models.isEmpty else { return nil }
+            return (family, models.sorted { $0.displayID < $1.displayID })
+        }
+    }
+
+    private func modelRow(_ model: CopilotUpstream.ModelInfo) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.displayID)
+                    .font(.body.monospaced())
+                    .lineLimit(1)
+                if let name = model.name, name != model.displayID {
+                    Text(name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+            if let ctx = formatContextWindow(model.contextWindow) {
+                Text(ctx)
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+            }
+            if model.supportsMessages {
+                Text("Messages")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if model.supportsResponses {
+                Text("Responses")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// One panel per client, listing its profiles with an inline add button in the header.
 struct ClientSection: View {
     @EnvironmentObject var state: AppState
     let client: ClientKind
@@ -66,27 +216,38 @@ struct ClientSection: View {
     }
 
     var body: some View {
-        Section {
-            if profiles.isEmpty {
-                Text("No profiles yet — add one to use \(client.displayName) through Copilot Bridge.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                ForEach(profiles) { profile in
-                    ProfileRow(profile: profile)
+        SettingsPanel(client.displayName, systemImage: client.icon) {
+            addButton
+        } content: {
+            VStack(alignment: .leading, spacing: 8) {
+                if profiles.isEmpty {
+                    Text("No profiles yet — add one to use \(client.displayName) through Copilot Bridge.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+                } else {
+                    VStack(spacing: 6) {
+                        ForEach(profiles) { profile in
+                            ProfileRow(profile: profile)
+                        }
+                    }
                 }
-            }
-        } header: {
-            HStack {
-                Label(client.displayName, systemImage: client.icon)
-                Spacer()
-                Button {
-                    onAdd()
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
-                .buttonStyle(.borderless)
             }
         }
+    }
+
+    private var addButton: some View {
+        Button {
+            onAdd()
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.borderless)
+        .help("Add profile")
+        .accessibilityLabel("Add profile")
     }
 }
 
@@ -134,28 +295,17 @@ struct AddProfileSheet: View {
     @EnvironmentObject var state: AppState
     @Environment(\.dismiss) private var dismiss
 
-    @State private var client: ClientKind
+    let client: ClientKind
     @State private var model: String = ""
     @State private var name: String = ""
 
     init(initialClient: ClientKind) {
-        _client = State(initialValue: initialClient)
+        self.client = initialClient
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New Profile").font(.title3.bold())
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Client").font(.caption).foregroundStyle(.secondary)
-                Picker("Client", selection: $client) {
-                    ForEach(ClientKind.allCases) { c in
-                        Text(c.displayName).tag(c)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Model").font(.caption).foregroundStyle(.secondary)
@@ -164,7 +314,7 @@ struct AddProfileSheet: View {
                     ForEach(groupedModels, id: \.family) { group in
                         Section(group.family) {
                             ForEach(group.models, id: \.id) { m in
-                                Text(modelLabel(m)).tag(m.id)
+                                Text(modelLabel(m)).tag(m.displayID)
                             }
                         }
                     }
@@ -186,7 +336,7 @@ struct AddProfileSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Add") {
-                    let selected = state.availableModels.first { $0.id == model }
+                    let selected = CopilotModelID.model(matching: model, in: state.availableModels)
                     let finalName = name.isEmpty ? defaultName : name
                     let profile = Profile(name: finalName, client: client, model: model,
                                           contextWindow: selected?.contextWindow)
@@ -199,53 +349,31 @@ struct AddProfileSheet: View {
         }
         .padding(20)
         .frame(width: 420)
-        .onChange(of: client) { _, _ in
-            if !filteredModels.contains(where: { $0.id == model }) { model = "" }
-        }
     }
 
     private var defaultName: String {
         Profile.defaultName(for: client, model: model.isEmpty ? "model" : model)
     }
 
-    private var filteredModels: [CopilotUpstream.ModelInfo] {
-        let models = state.availableModels
-        switch client {
-        case .claudeCode:
-            let claude = models.filter { $0.id.contains("claude") }
-            return claude.isEmpty ? models : claude
-        case .codex, .codexCLI:
-            return models
-        }
-    }
-
-    /// Groups models by family (claude / gpt / gemini / o-series / other) for the picker.
+    /// Groups models by family for the picker. Every client can choose any Copilot
+    /// model; the selected client only controls which config file the profile writes.
     private var groupedModels: [(family: String, models: [CopilotUpstream.ModelInfo])] {
         var buckets: [String: [CopilotUpstream.ModelInfo]] = [:]
-        for m in filteredModels {
-            buckets[Self.family(of: m.id), default: []].append(m)
+        for m in state.availableModels {
+            buckets[ModelFamily.family(of: m), default: []].append(m)
         }
-        let order = ["Claude", "GPT", "o-series", "Gemini", "Other"]
-        return order.compactMap { key in
+        return ModelFamily.order.compactMap { key in
             guard let models = buckets[key], !models.isEmpty else { return nil }
             return (key, models.sorted { $0.id < $1.id })
         }
     }
 
-    private static func family(of id: String) -> String {
-        let lower = id.lowercased()
-        if lower.contains("claude") { return "Claude" }
-        if lower.contains("gemini") { return "Gemini" }
-        if lower.hasPrefix("o1") || lower.hasPrefix("o3") || lower.hasPrefix("o4") { return "o-series" }
-        if lower.contains("gpt") || lower.hasPrefix("mai-") { return "GPT" }
-        return "Other"
-    }
-
     private func modelLabel(_ m: CopilotUpstream.ModelInfo) -> String {
+        let title = m.name.map { "\($0) (\(m.displayID))" } ?? m.displayID
         if let ctx = formatContextWindow(m.contextWindow) {
-            return "\(m.id)  ·  \(ctx)"
+            return "\(title)  ·  \(ctx)"
         }
-        return m.id
+        return title
     }
 
     private var hint: String {

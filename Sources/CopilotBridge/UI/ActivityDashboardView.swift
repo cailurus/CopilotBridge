@@ -11,20 +11,20 @@ struct ActivityDashboardView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                summary
-                heatmapCard
-                breakdownCard
-            }
-            .padding(20)
+        VStack(alignment: .leading, spacing: 12) {
+            summary
+            heatmapCard
+            breakdownCard
+            Spacer(minLength: 0)
         }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: Summary
 
     private var summary: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             stat("Total", "\(activity.totalRequests)", "number.circle")
             stat("Today", "\(activity.todayCount)", "calendar")
             stat("Models", "\(activity.modelTotals.count)", "cube.box")
@@ -39,36 +39,39 @@ struct ActivityDashboardView: View {
             Text(value).font(.title2.bold().monospacedDigit())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+        .padding(8)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: Heatmap
 
     private var heatmapCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Last 26 weeks").font(.headline)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent activity").font(.headline)
             if activity.totalRequests == 0 {
                 emptyState
             } else {
-                ContributionHeatmap(activity: activity)
+                GeometryReader { geo in
+                    ContributionHeatmap(activity: activity, availableWidth: geo.size.width)
+                }
+                .frame(height: 112)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+        .padding(10)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var emptyState: some View {
         Text("No requests yet. Point a client at the proxy to see activity here.")
             .font(.caption).foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, minHeight: 80, alignment: .center)
+            .frame(maxWidth: .infinity, minHeight: 62, alignment: .center)
     }
 
     // MARK: Per-model breakdown
 
     private var breakdownCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("By model").font(.headline)
             let totals = activity.modelTotals
             if totals.isEmpty {
@@ -76,16 +79,16 @@ struct ActivityDashboardView: View {
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 let maxCount = totals.first?.count ?? 1
-                VStack(spacing: 8) {
-                    ForEach(totals, id: \.model) { entry in
+                VStack(spacing: 6) {
+                    ForEach(totals.prefix(6), id: \.model) { entry in
                         modelBar(entry.model, entry.count, max: maxCount)
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+        .padding(10)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func modelBar(_ model: String, _ count: Int, max: Int) -> some View {
@@ -112,10 +115,17 @@ struct ActivityDashboardView: View {
 /// weekdays (Sun → Sat). Cell color intensity scales with that day's request count.
 struct ContributionHeatmap: View {
     @ObservedObject var activity: ActivityStore
+    let availableWidth: CGFloat
 
-    private let weeks = 26
-    private let cell: CGFloat = 12
+    private let cell: CGFloat = 10
     private let spacing: CGFloat = 3
+    private let labelWidth: CGFloat = 10
+
+    private var weeks: Int {
+        let usable = max(0, availableWidth - labelWidth - spacing)
+        let weekWidth = cell + spacing
+        return max(26, min(52, Int((usable + spacing) / weekWidth)))
+    }
 
     /// Grid of dates: [week][weekday]. Aligned so the last column ends at today's week.
     private var grid: [[Date?]] {

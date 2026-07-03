@@ -15,11 +15,13 @@ struct CopilotBridgeApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
+        Window("Preferences", id: "preferences") {
             SettingsView()
                 .environmentObject(state)
-                .frame(width: 460, height: 520)
+                .frame(width: 620, height: 520)
         }
+        .windowToolbarStyle(.unified(showsTitle: true))
+        .windowResizability(.contentSize)
     }
 
     private var menuBarSymbol: String {

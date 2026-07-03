@@ -235,6 +235,7 @@ enum ConfigWriter {
 
     private static func claudeModelName(_ profile: Profile) -> String {
         let m = profile.model
+        guard m.lowercased().hasPrefix("claude-") else { return m }
         if let window = profile.contextWindow,
            window > 800_000, window < 1_500_000, !m.hasSuffix(oneMSuffix) {
             return m + oneMSuffix
