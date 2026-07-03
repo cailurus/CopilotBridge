@@ -26,6 +26,9 @@ final class AppState: ObservableObject {
     @Published private(set) var loginStatus: LoginStatus = .signedOut
     @Published private(set) var availableModels: [CopilotUpstream.ModelInfo] = []
     @Published var lastActivity: String = "Idle"
+    @Published private(set) var requestCount = 0
+    @Published private(set) var lastError: String?
+    let activity = ActivityStore()
 
     private let tokens: CopilotTokenStore
     private let upstream: CopilotUpstream
@@ -151,6 +154,8 @@ final class AppState: ObservableObject {
         statsTimer = nil
         proxyStatus = .stopped
         lastActivity = "Proxy stopped"
+        requestCount = 0
+        lastError = nil
     }
 
     func restartProxy() {
@@ -164,6 +169,10 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 guard let self, let engine = self.engine else { return }
                 let (count, err) = await engine.stats()
+                self.requestCount = count
+                self.lastError = err
+                let byModel = await engine.drainModelCounts()
+                self.activity.record(counts: byModel)
                 if let err {
                     self.lastActivity = "Last error: \(err.prefix(80))"
                 } else if count > 0 {

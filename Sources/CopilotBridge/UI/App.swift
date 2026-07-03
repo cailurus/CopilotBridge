@@ -18,7 +18,7 @@ struct CopilotBridgeApp: App {
         Settings {
             SettingsView()
                 .environmentObject(state)
-                .frame(minWidth: 560, idealWidth: 580, minHeight: 540, idealHeight: 600)
+                .frame(width: 460, height: 520)
         }
     }
 

@@ -6,11 +6,10 @@ struct MenuContent: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             header
             Divider()
             statusRows
-            Divider()
             authSection
             if case .signedIn = state.loginStatus {
                 Divider()
@@ -23,24 +22,18 @@ struct MenuContent: View {
             Divider()
             footer
         }
-        .padding(12)
-        .frame(width: 320)
+        .padding(10)
+        .frame(width: 280)
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 6) {
             Image(systemName: "bolt.horizontal.circle.fill")
                 .foregroundStyle(.tint)
             Text("Copilot Bridge").font(.headline)
             Spacer()
-            statusDot
+            Circle().fill(proxyColor).frame(width: 8, height: 8)
         }
-    }
-
-    private var statusDot: some View {
-        Circle()
-            .fill(proxyColor)
-            .frame(width: 10, height: 10)
     }
 
     private var proxyColor: Color {
@@ -52,11 +45,9 @@ struct MenuContent: View {
     }
 
     private var statusRows: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             row("Endpoint", state.baseURLSummary)
             row("Proxy", proxyText)
-            row("Activity", state.lastActivity)
-                .lineLimit(1)
         }
         .font(.caption)
     }
@@ -69,6 +60,8 @@ struct MenuContent: View {
         }
     }
 
+    /// Only shown while signed out or mid-login. Once signed in, the header dot and
+    /// proxy controls convey state — a "signed in" row would be redundant.
     @ViewBuilder
     private var authSection: some View {
         switch state.loginStatus {
@@ -80,6 +73,7 @@ struct MenuContent: View {
             }
         case .checking:
             Label("Checking login…", systemImage: "hourglass")
+                .font(.caption)
                 .foregroundStyle(.secondary)
         case .pending(let code, let url):
             VStack(alignment: .leading, spacing: 4) {
@@ -97,13 +91,12 @@ struct MenuContent: View {
                 }
             }
         case .signedIn:
-            Label("Signed in to GitHub", systemImage: "checkmark.seal.fill")
-                .foregroundStyle(.green)
+            EmptyView()
         }
     }
 
     private var proxySection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        Group {
             switch state.proxyStatus {
             case .running:
                 Button {
@@ -121,28 +114,41 @@ struct MenuContent: View {
         }
     }
 
+    /// Applied/available profiles, grouped under their client so each app is labeled.
     private var profileSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Profiles").font(.caption).foregroundStyle(.secondary)
-            ForEach(state.settings.profiles) { profile in
-                HStack {
-                    Image(systemName: profile.applied ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(profile.applied ? .green : .secondary)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(profile.name).font(.caption).lineLimit(1)
-                        Text(profile.model).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if profile.applied {
-                        Button("Revert") { state.unapplyProfile(profile) }
-                            .buttonStyle(.borderless).font(.caption)
-                    } else {
-                        Button("Apply") { state.applyProfile(profile) }
-                            .buttonStyle(.borderless).font(.caption)
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(ClientKind.allCases) { client in
+                let profiles = state.settings.profiles.filter { $0.client == client }
+                if !profiles.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(client.displayName, systemImage: client.icon)
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        ForEach(profiles) { profile in
+                            profileRow(profile)
+                        }
                     }
                 }
             }
         }
+    }
+
+    private func profileRow(_ profile: Profile) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: profile.applied ? "checkmark.circle.fill" : "circle")
+                .font(.caption)
+                .foregroundStyle(profile.applied ? .green : .secondary)
+            Text(profile.model).font(.caption).lineLimit(1)
+            Spacer()
+            if profile.applied {
+                Button("Revert") { state.unapplyProfile(profile) }
+                    .buttonStyle(.borderless).font(.caption)
+            } else {
+                Button("Apply") { state.applyProfile(profile) }
+                    .buttonStyle(.borderless).font(.caption)
+            }
+        }
+        .padding(.leading, 4)
     }
 
     private var footer: some View {
@@ -151,7 +157,7 @@ struct MenuContent: View {
                 NSApp.activate(ignoringOtherApps: true)
                 openSettings()
             } label: {
-                Label("Settings…", systemImage: "gearshape")
+                Label("Settings", systemImage: "gearshape")
             }
             Spacer()
             Button {
@@ -167,7 +173,7 @@ struct MenuContent: View {
         HStack(alignment: .top) {
             Text(label).foregroundStyle(.secondary)
             Spacer()
-            Text(value).multilineTextAlignment(.trailing)
+            Text(value).multilineTextAlignment(.trailing).lineLimit(1)
         }
     }
 }

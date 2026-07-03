@@ -65,9 +65,9 @@ final class HTTPServer: @unchecked Sendable {
         if host == "127.0.0.1" || host == "localhost" {
             params.requiredInterfaceType = .loopback
         }
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
+        guard (1...65535).contains(port), let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             throw NSError(domain: "HTTPServer", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Invalid port \(port)"])
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid port \(port) (must be 1–65535)"])
         }
         let listener = try NWListener(using: params, on: nwPort)
         listener.newConnectionHandler = { [weak self] conn in

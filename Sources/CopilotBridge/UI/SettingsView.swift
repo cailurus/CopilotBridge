@@ -1,17 +1,21 @@
 import SwiftUI
 
-/// Tabbed settings window: General (network/startup) + Profiles (system config).
+/// Tabbed settings window: General (network/startup), Profiles (system config),
+/// and Activity (usage dashboard). Tabs share consistent layout and width.
 struct SettingsView: View {
+    @EnvironmentObject var state: AppState
+
     var body: some View {
         TabView {
             GeneralSettingsView()
                 .tabItem { Label("General", systemImage: "gearshape") }
             ProfilesSettingsView()
                 .tabItem { Label("Profiles", systemImage: "person.2.badge.gearshape") }
+            ActivityDashboardView(activity: state.activity)
+                .tabItem { Label("Activity", systemImage: "chart.bar.xaxis") }
             AboutView()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .padding(20)
     }
 }
 
@@ -34,9 +38,10 @@ struct GeneralSettingsView: View {
                 }
                 if state.settings.bindMode == .lan {
                     LabeledContent("Access key") {
-                        HStack {
+                        HStack(spacing: 6) {
                             TextField("required for other devices", text: $state.settings.accessKey)
                                 .textFieldStyle(.roundedBorder)
+                                .frame(width: 150)
                             Button("Generate") {
                                 state.settings.accessKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
                                 state.persist()

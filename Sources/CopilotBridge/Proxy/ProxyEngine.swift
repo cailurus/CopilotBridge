@@ -12,6 +12,9 @@ actor ProxyEngine {
     private var snapshot: Snapshot
     private(set) var lastError: String?
     private(set) var requestCount = 0
+    /// Per-model counts accumulated since the last drain. AppState polls and clears
+    /// this to feed the persisted ActivityStore, keeping recording off the hot path.
+    private var pendingModelCounts: [String: Int] = [:]
 
     init(upstream: CopilotUpstream, snapshot: Snapshot) {
         self.upstream = upstream
@@ -21,6 +24,18 @@ actor ProxyEngine {
     func update(snapshot: Snapshot) { self.snapshot = snapshot }
 
     func stats() -> (count: Int, lastError: String?) { (requestCount, lastError) }
+
+    /// Returns per-model counts since the last call and resets the buffer.
+    func drainModelCounts() -> [String: Int] {
+        defer { pendingModelCounts.removeAll(keepingCapacity: true) }
+        return pendingModelCounts
+    }
+
+    /// Records one served request against its resolved model.
+    private func tally(_ model: String) {
+        requestCount += 1
+        pendingModelCounts[model, default: 0] += 1
+    }
 
     // MARK: Model resolution
 
@@ -85,12 +100,16 @@ actor ProxyEngine {
     // MARK: OpenAI chat (Codex-compatible clients that use chat/completions)
 
     private func openAIChat(_ req: HTTPServer.Request) async -> HTTPServer.Response {
-        requestCount += 1
         guard var body = try? JSONSerialization.jsonObject(with: req.body) as? [String: Any] else {
+            requestCount += 1
             return .json(400, ["error": ["message": "invalid JSON body"]])
         }
         if let model = body["model"] as? String {
-            body["model"] = await resolveModel(model)
+            let resolved = await resolveModel(model)
+            body["model"] = resolved
+            tally(resolved)
+        } else {
+            requestCount += 1
         }
         let stream = body["stream"] as? Bool ?? false
         guard let outBody = try? JSONSerialization.data(withJSONObject: body) else {
@@ -102,12 +121,16 @@ actor ProxyEngine {
     // MARK: OpenAI Responses (Codex / Codex CLI default wire_api)
 
     private func openAIResponses(_ req: HTTPServer.Request) async -> HTTPServer.Response {
-        requestCount += 1
         guard var body = try? JSONSerialization.jsonObject(with: req.body) as? [String: Any] else {
+            requestCount += 1
             return .json(400, ["error": ["message": "invalid JSON body"]])
         }
         if let model = body["model"] as? String {
-            body["model"] = await resolveModel(model)
+            let resolved = await resolveModel(model)
+            body["model"] = resolved
+            tally(resolved)
+        } else {
+            requestCount += 1
         }
         let stream = body["stream"] as? Bool ?? false
         guard let outBody = try? JSONSerialization.data(withJSONObject: body) else {
@@ -168,12 +191,13 @@ actor ProxyEngine {
     // MARK: Anthropic messages (Claude Code) -> OpenAI chat translation
 
     private func anthropicMessages(_ req: HTTPServer.Request) async -> HTTPServer.Response {
-        requestCount += 1
         guard let anthropic = try? JSONSerialization.jsonObject(with: req.body) as? [String: Any] else {
+            requestCount += 1
             return .json(400, ["error": ["message": "invalid JSON body"]])
         }
         let requested = anthropic["model"] as? String ?? "claude-sonnet-4"
         let model = await resolveModel(requested)
+        tally(model)
         let (openAIBody, stream) = AnthropicTranslate.toOpenAI(anthropic, resolvedModel: model)
         guard let outBody = try? JSONSerialization.data(withJSONObject: openAIBody) else {
             return .json(400, ["error": ["message": "encode failed"]])

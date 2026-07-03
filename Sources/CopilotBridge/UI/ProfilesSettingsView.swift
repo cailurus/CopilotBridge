@@ -3,16 +3,37 @@ import SwiftUI
 /// Manage system-level profiles, grouped by client. Each client (Codex, Codex CLI,
 /// Claude Code) can have its own profiles; applying one writes that client's config
 /// file. Only one profile per client is active at a time.
+///
+/// Uses the same Form/.formStyle(.grouped) container as General so both Settings
+/// tabs share one consistent width and layout.
 struct ProfilesSettingsView: View {
     @EnvironmentObject var state: AppState
     @State private var showingAdd = false
     @State private var addClient: ClientKind = .codexCLI
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-            content
+        Group {
+            if state.loginStatus != .signedIn {
+                signInPrompt
+            } else {
+                Form {
+                    ForEach(ClientKind.allCases) { client in
+                        ClientSection(client: client) { addClient = client; showingAdd = true }
+                    }
+
+                    Section {
+                        Button {
+                            Task { await state.refreshModels() }
+                        } label: {
+                            Label("Refresh model list", systemImage: "arrow.clockwise")
+                        }
+                    } footer: {
+                        Text("\(state.availableModels.count) Copilot models available.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .formStyle(.grouped)
+            }
         }
         .sheet(isPresented: $showingAdd) {
             AddProfileSheet(initialClient: addClient)
@@ -20,50 +41,12 @@ struct ProfilesSettingsView: View {
         }
     }
 
-    private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Profiles").font(.headline)
-                Text("Point each client at a Copilot model")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button {
-                Task { await state.refreshModels() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .help("Refresh model list")
-            .disabled(state.loginStatus != .signedIn)
-        }
-        .padding(.bottom, 10)
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if state.loginStatus != .signedIn {
-            centeredMessage(
-                icon: "person.crop.circle.badge.exclamationmark",
-                title: "Sign in first",
-                subtitle: "Sign in to GitHub from the menu bar to load Copilot models.")
-        } else {
-            ScrollView {
-                VStack(spacing: 16) {
-                    ForEach(ClientKind.allCases) { client in
-                        ClientSection(client: client) { addClient = client; showingAdd = true }
-                    }
-                }
-                .padding(.vertical, 12)
-            }
-        }
-    }
-
-    private func centeredMessage(icon: String, title: String, subtitle: String) -> some View {
+    private var signInPrompt: some View {
         VStack(spacing: 8) {
-            Image(systemName: icon)
+            Image(systemName: "person.crop.circle.badge.exclamationmark")
                 .font(.system(size: 34)).foregroundStyle(.secondary)
-            Text(title).font(.headline)
-            Text(subtitle)
+            Text("Sign in first").font(.headline)
+            Text("Sign in to GitHub from the menu bar to load Copilot models.")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -72,7 +55,7 @@ struct ProfilesSettingsView: View {
     }
 }
 
-/// One grouped card per client, listing its profiles with an inline add button.
+/// One Section per client, listing its profiles with an inline add button in the header.
 struct ClientSection: View {
     @EnvironmentObject var state: AppState
     let client: ClientKind
@@ -83,10 +66,18 @@ struct ClientSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        Section {
+            if profiles.isEmpty {
+                Text("No profiles yet — add one to use \(client.displayName) through Copilot Bridge.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(profiles) { profile in
+                    ProfileRow(profile: profile)
+                }
+            }
+        } header: {
             HStack {
-                Image(systemName: client.icon).foregroundStyle(.tint)
-                Text(client.displayName).font(.headline)
+                Label(client.displayName, systemImage: client.icon)
                 Spacer()
                 Button {
                     onAdd()
@@ -94,28 +85,8 @@ struct ClientSection: View {
                     Label("Add", systemImage: "plus")
                 }
                 .buttonStyle(.borderless)
-                .font(.caption)
-            }
-
-            if profiles.isEmpty {
-                Text("No profiles yet — add one to use \(client.displayName) through Copilot Bridge.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(profiles) { profile in
-                        ProfileRow(profile: profile)
-                        if profile.id != profiles.last?.id { Divider() }
-                    }
-                }
             }
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(.quaternary, lineWidth: 1))
     }
 }
 
@@ -155,7 +126,7 @@ struct ProfileRow: View {
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 2)
     }
 }
 
@@ -227,7 +198,7 @@ struct AddProfileSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 420)
         .onChange(of: client) { _, _ in
             if !filteredModels.contains(where: { $0.id == model }) { model = "" }
         }
