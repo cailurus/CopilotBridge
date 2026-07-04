@@ -54,9 +54,28 @@ final class HTTPServer: @unchecked Sendable {
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "copilotbridge.http", attributes: .concurrent)
     private let handler: @Sendable (Request) async -> Response
+    /// Called when the listener stops serving unexpectedly (bind failure, or it drops
+    /// out of `.ready` while running). `stop()` detaches this first so a deliberate
+    /// teardown's `.cancelled` transition stays silent.
+    private let failureLock = NSLock()
+    private var onFailure: (@Sendable (String) -> Void)?
 
     init(handler: @escaping @Sendable (Request) async -> Response) {
         self.handler = handler
+    }
+
+    /// Sets the callback fired when the listener enters `.failed`/`.waiting`.
+    func setFailureHandler(_ handler: @escaping @Sendable (String) -> Void) {
+        failureLock.lock()
+        onFailure = handler
+        failureLock.unlock()
+    }
+
+    private func reportFailure(_ message: String) {
+        failureLock.lock()
+        let handler = onFailure
+        failureLock.unlock()
+        handler?(message)
     }
 
     func start(host: String, port: Int) throws {
@@ -73,9 +92,18 @@ final class HTTPServer: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] conn in
             self?.accept(conn)
         }
-        listener.stateUpdateHandler = { state in
-            if case .failed(let err) = state {
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed(let err):
                 NSLog("HTTPServer listener failed: \(err)")
+                self?.reportFailure(Self.describe(err))
+            case .waiting(let err):
+                // The listener could not acquire the port (e.g. already in use) and is
+                // waiting to retry. Surface it as a failure so the UI stops claiming "Running".
+                NSLog("HTTPServer listener waiting: \(err)")
+                self?.reportFailure(Self.describe(err))
+            default:
+                break
             }
         }
         listener.start(queue: queue)
@@ -83,6 +111,11 @@ final class HTTPServer: @unchecked Sendable {
     }
 
     func stop() {
+        // Detach first so the listener's own `.cancelled` transition isn't reported
+        // as a failure.
+        failureLock.lock()
+        onFailure = nil
+        failureLock.unlock()
         listener?.cancel()
         listener = nil
     }
@@ -183,5 +216,18 @@ final class HTTPServer: @unchecked Sendable {
         case 502: return "Bad Gateway"
         default: return "Status"
         }
+    }
+
+    /// Human-readable text for a listener failure, mapping the common POSIX cases.
+    static func describe(_ error: NWError) -> String {
+        if case let .posix(code) = error {
+            switch code {
+            case .EADDRINUSE: return "Port already in use"
+            case .EACCES: return "Permission denied for this port"
+            case .EADDRNOTAVAIL: return "Address not available"
+            default: break
+            }
+        }
+        return error.localizedDescription
     }
 }

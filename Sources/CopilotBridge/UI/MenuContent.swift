@@ -116,14 +116,25 @@ struct MenuContent: View {
             Image(systemName: profile.applied ? "checkmark.circle.fill" : "circle")
                 .font(.caption)
                 .foregroundStyle(profile.applied ? .green : .secondary)
-            Text(profile.model).font(.caption).lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(profile.name).font(.caption).lineLimit(1)
+                Text(profile.model).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
             Spacer()
             if profile.applied {
                 Button("Revert") { state.unapplyProfile(profile) }
                     .buttonStyle(.borderless).font(.caption)
             } else {
-                Button("Apply") { state.applyProfile(profile) }
-                    .buttonStyle(.borderless).font(.caption)
+                Button("Apply") {
+                    state.applyProfile(profile)
+                    // The menu is a popover and can't host the migration sheet, so
+                    // surface it in the Preferences window instead.
+                    if state.pendingMigration != nil {
+                        NSApp.activate(ignoringOtherApps: true)
+                        openWindow(id: "preferences")
+                    }
+                }
+                .buttonStyle(.borderless).font(.caption)
             }
         }
         .padding(.leading, 4)

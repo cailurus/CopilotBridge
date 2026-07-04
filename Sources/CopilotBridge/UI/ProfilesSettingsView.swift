@@ -42,6 +42,10 @@ struct ProfilesSettingsView: View {
         .sheet(isPresented: $showingModels) {
             ModelListSheet(models: state.availableModels)
         }
+        .sheet(item: $state.pendingMigration) { prompt in
+            MigrationPromptSheet(prompt: prompt)
+                .environmentObject(state)
+        }
     }
 
     private var modelRefreshRow: some View {
@@ -383,5 +387,85 @@ struct AddProfileSheet: View {
         case .claudeCode:
             return "Writes ANTHROPIC_BASE_URL + model into ~/.claude/settings.json."
         }
+    }
+}
+
+/// Prompt shown after applying a Codex profile when prior conversations used another
+/// provider. Codex groups its history by provider, so migrating relabels those threads
+/// to Copilot Bridge; skipping leaves them in place (still reachable by switching back).
+struct MigrationPromptSheet: View {
+    @EnvironmentObject var state: AppState
+
+    let prompt: MigrationPrompt
+    @State private var selected: Set<String>
+
+    init(prompt: MigrationPrompt) {
+        self.prompt = prompt
+        _selected = State(initialValue: Set(prompt.providers.map(\.provider)))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Bring your Codex history along?").font(.title3.bold())
+
+            Text("Codex groups its conversation list by model provider. Your earlier chats "
+                 + "are still saved, but Codex only shows the ones matching the active provider. "
+                 + "Migrate them to Copilot Bridge to keep them visible.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(prompt.providers, id: \.provider) { entry in
+                    Toggle(isOn: binding(for: entry.provider)) {
+                        HStack(spacing: 8) {
+                            Text(entry.provider).font(.body.monospaced())
+                            Text("\(entry.count)")
+                                .font(.caption2)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.quaternary, in: Capsule())
+                            Text(entry.count == 1 ? "conversation" : "conversations")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+
+            if let message = prompt.errorMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("Leave them") { state.dismissMigration() }
+                Button(migrateLabel) { state.confirmMigration(providers: Array(selected)) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selected.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private var migrateLabel: String {
+        let total = prompt.providers
+            .filter { selected.contains($0.provider) }
+            .reduce(0) { $0 + $1.count }
+        return total > 0 ? "Migrate \(total)" : "Migrate"
+    }
+
+    private func binding(for provider: String) -> Binding<Bool> {
+        Binding(
+            get: { selected.contains(provider) },
+            set: { isOn in
+                if isOn { selected.insert(provider) } else { selected.remove(provider) }
+            }
+        )
     }
 }

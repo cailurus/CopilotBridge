@@ -15,6 +15,14 @@ enum LoginStatus: Equatable {
     case checking
 }
 
+/// Drives the Codex history-migration sheet: which prior providers were detected
+/// (with thread counts) and an optional message from a blocked attempt.
+struct MigrationPrompt: Identifiable, Equatable {
+    let id = UUID()
+    let providers: [CodexHistoryStore.ProviderCount]
+    var errorMessage: String?
+}
+
 /// Central app state: auth, proxy lifecycle, profiles, and settings persistence.
 @MainActor
 final class AppState: ObservableObject {
@@ -28,6 +36,9 @@ final class AppState: ObservableObject {
     @Published var lastActivity: String = "Idle"
     @Published private(set) var requestCount = 0
     @Published private(set) var lastError: String?
+    /// Set after applying a Codex profile when prior threads use another provider,
+    /// which drives the migration prompt sheet.
+    @Published var pendingMigration: MigrationPrompt?
     let activity = ActivityStore()
 
     private let upstream: CopilotUpstream
@@ -194,6 +205,9 @@ final class AppState: ObservableObject {
         let server = HTTPServer { [engine] req in
             await engine.handle(req)
         }
+        server.setFailureHandler { [weak self] message in
+            Task { @MainActor in self?.handleProxyFailure(message) }
+        }
         do {
             let host = settings.bindMode.bindHost
             try server.start(host: host, port: settings.port)
@@ -207,6 +221,29 @@ final class AppState: ObservableObject {
             self.engine = nil
         }
     }
+
+    /// Called when the running listener stops serving unexpectedly. Reflects the real
+    /// listener state in the UI instead of leaving a stale "Running". Ignored if the
+    /// proxy was already torn down (stale callback after a deliberate stop).
+    func handleProxyFailure(_ message: String) {
+        guard server != nil else { return }
+        server = nil
+        engine = nil
+        statsTimer?.invalidate()
+        statsTimer = nil
+        proxyStatus = .error(message)
+        lastError = message
+        lastActivity = "Proxy stopped: \(message)"
+        requestCount = 0
+    }
+
+    #if DEBUG
+    /// Test seam: puts the proxy into the running state without binding a socket.
+    func forceProxyRunningForTesting() {
+        server = HTTPServer { _ in .text(200, "test") }
+        proxyStatus = .running
+    }
+    #endif
 
     func stopProxy() {
         server?.stop()
@@ -289,9 +326,46 @@ final class AppState: ObservableObject {
             }
             persist()
             lastActivity = "Applied \(profile.name)"
+            offerHistoryMigrationIfNeeded(for: profile)
         } catch {
             lastActivity = "Apply failed: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: Codex history migration
+
+    /// After applying a Codex profile, offer to relabel threads from a previously-used
+    /// provider so they stay visible in Codex's provider-grouped history list.
+    private func offerHistoryMigrationIfNeeded(for profile: Profile) {
+        guard profile.client == .codex || profile.client == .codexCLI else { return }
+        guard let others = try? CodexHistoryStore.otherProviders(), !others.isEmpty else { return }
+        pendingMigration = MigrationPrompt(providers: others)
+    }
+
+    /// Relabels the chosen providers' threads to Copilot Bridge. Keeps the sheet open
+    /// with a message if Codex is still running (its database can't be written safely).
+    func confirmMigration(providers: [String]) {
+        do {
+            let moved = try CodexHistoryStore.migrate(providers: providers)
+            lastActivity = "Migrated \(moved) conversation(s) to Copilot Bridge"
+            pendingMigration = nil
+        } catch let error as CodexHistoryStore.HistoryError {
+            if case .codexRunning = error, let current = pendingMigration {
+                pendingMigration = MigrationPrompt(
+                    providers: current.providers,
+                    errorMessage: error.localizedDescription)
+            } else {
+                lastActivity = "Migration failed: \(error.localizedDescription)"
+                pendingMigration = nil
+            }
+        } catch {
+            lastActivity = "Migration failed: \(error.localizedDescription)"
+            pendingMigration = nil
+        }
+    }
+
+    func dismissMigration() {
+        pendingMigration = nil
     }
 
     func unapplyProfile(_ profile: Profile) {
