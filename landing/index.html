@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CopilotBridge — Route Copilot Traffic Locally</title>
+    <meta
+      name="description"
+      content="CopilotBridge is a local macOS menu-bar proxy that routes Codex/Codex CLI/Claude Code traffic to your GitHub Copilot subscription."
+    />
+    <style>
+      :root {
+        --bg: #f4f6fb;
+        --surface: rgba(255, 255, 255, 0.72);
+        --surface-strong: rgba(255, 255, 255, 0.9);
+        --text: #0f172a;
+        --muted: #5b6476;
+        --line: rgba(15, 23, 42, 0.14);
+        --primary: #1d4ed8;
+        --primary-hover: #1e40af;
+        --glow: rgba(37, 99, 235, 0.26);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        color: var(--text);
+        background:
+          radial-gradient(1000px 480px at 95% -5%, rgba(59, 130, 246, 0.17), transparent 58%),
+          radial-gradient(900px 420px at -10% 35%, rgba(14, 165, 233, 0.12), transparent 58%),
+          var(--bg);
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+      }
+
+      .wrap {
+        max-width: 1040px;
+        margin: 0 auto;
+        padding: 64px 20px 72px;
+      }
+
+      .intro {
+        text-align: center;
+        max-width: 640px;
+        margin: 0 auto;
+      }
+
+      .flow-stage {
+        position: relative;
+        margin-top: 34px;
+        min-height: 420px;
+        overflow: hidden;
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(226, 238, 255, 0.32));
+      }
+
+      #flow-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.9rem, 3.6vw, 2.8rem);
+        line-height: 1.08;
+        letter-spacing: -0.02em;
+      }
+
+      .sub {
+        margin: 16px auto 0;
+        color: var(--muted);
+        max-width: 56ch;
+        font-size: 1.05rem;
+        line-height: 1.55;
+      }
+
+      .hint {
+        margin-top: 14px;
+        color: #3b82f6;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+
+      .cta {
+        margin-top: 30px;
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .btn-icon {
+        width: 16px;
+        height: 16px;
+        margin-top: -2px;
+      }
+
+      .btn {
+        text-decoration: none;
+        border-radius: 12px;
+        padding: 11px 16px;
+        border: 1px solid transparent;
+        font-weight: 600;
+        transition: transform 0.14s ease, box-shadow 0.14s ease, background-color 0.14s ease;
+      }
+
+      .btn:hover {
+        transform: translateY(-1px);
+      }
+
+      .btn.primary {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #fff;
+        background: var(--primary);
+        box-shadow: 0 10px 22px rgba(37, 99, 235, 0.32);
+      }
+
+      .btn.primary:hover {
+        background: var(--primary-hover);
+      }
+
+      .btn.secondary {
+        color: var(--text);
+        border-color: var(--line);
+        background: rgba(255, 255, 255, 0.75);
+      }
+
+      .cta-note {
+        margin: 12px 0 0;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .footer {
+        margin-top: 16px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.93rem;
+      }
+
+      .footer a {
+        color: inherit;
+      }
+
+      @media (max-width: 980px) {
+        .flow-stage {
+          min-height: 300px;
+        }
+      }
+
+      @media (max-width: 840px) {
+        .wrap {
+          padding: 20px 14px 48px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .btn,
+        .chip {
+          transition: none;
+        }
+
+        .btn:hover {
+          transform: none;
+        }
+
+        .hint::after {
+          content: " (motion reduced by system preference)";
+          color: var(--muted);
+          font-weight: 500;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <section class="intro" aria-label="Intro">
+        <h1>CopilotBridge</h1>
+        <p class="sub">
+          Route coding traffic from Codex, Codex CLI, and Claude Code through a local bridge to your own
+          GitHub Copilot subscription.
+        </p>
+        <p class="hint">Move your cursor to route traffic.</p>
+      </section>
+
+      <section class="flow-stage" aria-label="Interactive data flow">
+        <canvas id="flow-canvas" aria-hidden="true"></canvas>
+      </section>
+
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/cailurus/CopilotBridge/releases/latest/download/CopilotBridge-0.1.2.dmg">
+          <svg class="btn-icon" viewBox="0 0 384 512" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/>
+          </svg>
+          Download DMG
+        </a>
+        <a class="btn secondary" href="https://github.com/cailurus/CopilotBridge/releases">View Releases</a>
+      </div>
+
+      <p class="cta-note">Windows support is coming soon.</p>
+
+      <footer class="footer">
+        <a href="https://github.com/cailurus/CopilotBridge">GitHub</a>
+        ·
+        <a href="https://github.com/cailurus/CopilotBridge/releases/latest">Latest: v0.1.2</a>
+      </footer>
+    </main>
+
+    <script>
+      (() => {
+        const stage = document.querySelector('.flow-stage');
+        const canvas = document.getElementById('flow-canvas');
+        if (!stage || !canvas) return;
+
+        const ctx = canvas.getContext('2d', { alpha: true });
+        if (!ctx) return;
+
+        const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        let level = reduceMotion ? 3 : 0;
+        let activePath = null;
+        let hoverPath = null;
+        let raf = 0;
+        let running = true;
+
+        const pointer = { x: -9999, y: -9999, active: false };
+        const particles = [];
+        const paths = [];
+        const nodes = {};
+
+        let width = 0;
+        let height = 0;
+        let dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+
+        const BASE_COUNTS = [130, 80, 36, 0];
+        const BASE_SPEED = [0.0017, 0.0013, 0.0011, 0];
+
+        const colors = {
+          codex: 'rgba(37, 99, 235, 0.95)',
+          'codex-cli': 'rgba(56, 189, 248, 0.95)',
+          claude: 'rgba(139, 92, 246, 0.95)',
+          egress: 'rgba(245, 158, 11, 0.95)'
+        };
+
+        function setCanvasSize() {
+          const rect = stage.getBoundingClientRect();
+          width = Math.max(1, rect.width);
+          height = Math.max(1, rect.height);
+          canvas.width = Math.floor(width * dpr);
+          canvas.height = Math.floor(height * dpr);
+          canvas.style.width = width + 'px';
+          canvas.style.height = height + 'px';
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          buildGraph();
+          seedParticles();
+        }
+
+        function buildGraph() {
+          const yTop = height * 0.34;
+          const gap = height * 0.18;
+          nodes.codex = { x: width * 0.14, y: yTop };
+          nodes['codex-cli'] = { x: width * 0.14, y: yTop + gap };
+          nodes.claude = { x: width * 0.14, y: yTop + gap * 2 };
+          nodes.bridge = { x: width * 0.52, y: height * 0.5 };
+          nodes.copilot = { x: width * 0.86, y: height * 0.5 };
+
+          paths.length = 0;
+          paths.push(
+            makePath('codex', nodes.codex, nodes.bridge),
+            makePath('codex-cli', nodes['codex-cli'], nodes.bridge),
+            makePath('claude', nodes.claude, nodes.bridge),
+            makePath('egress', nodes.bridge, nodes.copilot)
+          );
+        }
+
+        function makePath(id, from, to) {
+          const dx = to.x - from.x;
+          const dy = to.y - from.y;
+          const bend = Math.min(120, Math.abs(dx) * 0.26);
+          return {
+            id,
+            from,
+            to,
+            c1: { x: from.x + bend, y: from.y },
+            c2: { x: to.x - bend, y: to.y }
+          };
+        }
+
+        function bezier(p, t) {
+          const mt = 1 - t;
+          const mt2 = mt * mt;
+          const t2 = t * t;
+          const a = mt2 * mt;
+          const b = 3 * mt2 * t;
+          const c = 3 * mt * t2;
+          const d = t2 * t;
+          return {
+            x: a * p.from.x + b * p.c1.x + c * p.c2.x + d * p.to.x,
+            y: a * p.from.y + b * p.c1.y + c * p.c2.y + d * p.to.y
+          };
+        }
+
+        function seedParticles() {
+          particles.length = 0;
+          if (level >= 3) return;
+
+          const count = BASE_COUNTS[level];
+          const pathWeights = [0.23, 0.23, 0.23, 0.31];
+          for (let i = 0; i < count; i++) {
+            const r = Math.random();
+            let bucket = 0;
+            let acc = 0;
+            for (let j = 0; j < pathWeights.length; j++) {
+              acc += pathWeights[j];
+              if (r <= acc) {
+                bucket = j;
+                break;
+              }
+            }
+            const path = paths[bucket];
+            particles.push({
+              path,
+              t: Math.random(),
+              speed: BASE_SPEED[level] + Math.random() * BASE_SPEED[level],
+              radius: level === 2 ? 1.5 : 1.8 + Math.random() * 1.4,
+              alpha: 0.28 + Math.random() * 0.56
+            });
+          }
+        }
+
+        function distanceToPath(path, x, y) {
+          let best = Infinity;
+          const samples = 64;
+          for (let i = 0; i <= samples; i++) {
+            const pt = bezier(path, i / samples);
+            const dx = pt.x - x;
+            const dy = pt.y - y;
+            const d = Math.hypot(dx, dy);
+            if (d < best) best = d;
+          }
+          return best;
+        }
+
+        function detectHoverPath(x, y) {
+          let winner = null;
+          let best = Infinity;
+          for (const path of paths) {
+            const d = distanceToPath(path, x, y);
+            if (d < best) {
+              best = d;
+              winner = path.id;
+            }
+          }
+          return best < 34 ? winner : null;
+        }
+
+        function updateParticles(dt) {
+          for (const p of particles) {
+            let speed = p.speed * dt * 0.06;
+            if (activePath && p.path.id === activePath) {
+              speed *= 2.35;
+            }
+
+            p.t += speed;
+            if (p.t > 1) p.t -= 1;
+          }
+        }
+
+        function drawPath(path, color, widthLine, alphaMul = 1) {
+          ctx.beginPath();
+          ctx.moveTo(path.from.x, path.from.y);
+          ctx.bezierCurveTo(path.c1.x, path.c1.y, path.c2.x, path.c2.y, path.to.x, path.to.y);
+          ctx.strokeStyle = color.replace('0.95', String(Math.max(0.08, alphaMul * 0.34)));
+          ctx.lineWidth = widthLine;
+          ctx.stroke();
+        }
+
+        function drawNode(node, r, color, glow = false) {
+          if (glow) {
+            const g = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, r * 3);
+            g.addColorStop(0, 'rgba(37, 99, 235, 0.35)');
+            g.addColorStop(1, 'rgba(37, 99, 235, 0)');
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, r * 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+        }
+
+        function drawLabels() {
+          ctx.font = '600 11px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+          ctx.fillStyle = 'rgba(63, 74, 95, 0.9)';
+          ctx.fillText('◼ Codex', nodes.codex.x - 28, nodes.codex.y - 14);
+          ctx.fillText('▸ Codex CLI', nodes['codex-cli'].x - 36, nodes['codex-cli'].y - 14);
+          ctx.fillText('✦ Claude', nodes.claude.x - 30, nodes.claude.y - 14);
+          ctx.fillText('CopilotBridge', nodes.bridge.x - 36, nodes.bridge.y - 16);
+          ctx.fillText('GitHub Copilot', nodes.copilot.x - 40, nodes.copilot.y - 14);
+        }
+
+        function drawParticles() {
+          for (const p of particles) {
+            const pt = bezier(p.path, p.t);
+            const colorKey = p.path.id;
+            const base = colors[colorKey] || 'rgba(37,99,235,0.95)';
+            const alpha = activePath && p.path.id !== activePath ? p.alpha * 0.28 : p.alpha;
+
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, p.radius, 0, Math.PI * 2);
+            ctx.fillStyle = base.replace('0.95', String(Math.max(0.12, alpha)));
+            ctx.fill();
+          }
+        }
+
+        function clearCanvas() {
+          if (level === 0) {
+            ctx.fillStyle = 'rgba(244, 246, 251, 0.16)';
+            ctx.fillRect(0, 0, width, height);
+          } else {
+            ctx.clearRect(0, 0, width, height);
+          }
+        }
+
+        function render(dt) {
+          clearCanvas();
+
+          const dimOthers = activePath ? 0.35 : 1;
+
+          drawPath(paths[0], colors.codex, 1.2, activePath && activePath !== 'codex' ? dimOthers : 1);
+          drawPath(paths[1], colors['codex-cli'], 1.2, activePath && activePath !== 'codex-cli' ? dimOthers : 1);
+          drawPath(paths[2], colors.claude, 1.2, activePath && activePath !== 'claude' ? dimOthers : 1);
+          drawPath(paths[3], colors.egress, 1.35, activePath && activePath !== 'egress' ? dimOthers : 1);
+
+          const pulse = 1 + Math.sin(performance.now() * 0.0024) * (level >= 2 ? 0.02 : 0.08);
+          drawNode(nodes.bridge, 6.8 * pulse, 'rgba(37,99,235,0.88)', true);
+          drawNode(nodes.copilot, 4.6, 'rgba(15, 23, 42, 0.42)');
+          drawNode(nodes.codex, 4, 'rgba(37, 99, 235, 0.66)');
+          drawNode(nodes['codex-cli'], 4, 'rgba(56, 189, 248, 0.66)');
+          drawNode(nodes.claude, 4, 'rgba(29, 78, 216, 0.66)');
+
+          if (level <= 2) {
+            updateParticles(dt);
+            drawParticles();
+          }
+
+          drawLabels();
+        }
+
+        let last = performance.now();
+        let fpsProbeFrames = 0;
+        let fpsProbeStart = performance.now();
+
+        function tick(now) {
+          if (!running) return;
+          const dt = Math.min(40, now - last);
+          last = now;
+
+          render(dt);
+
+          if (!reduceMotion && fpsProbeFrames < 180) {
+            fpsProbeFrames++;
+            if (fpsProbeFrames % 30 === 0) {
+              const elapsed = (now - fpsProbeStart) / 1000;
+              const fps = fpsProbeFrames / Math.max(0.001, elapsed);
+              if (fps < 45 && level < 2) {
+                level++;
+                seedParticles();
+              }
+            }
+          }
+
+          raf = requestAnimationFrame(tick);
+        }
+
+        stage.addEventListener('mousemove', (e) => {
+          const r = stage.getBoundingClientRect();
+          pointer.x = e.clientX - r.left;
+          pointer.y = e.clientY - r.top;
+          pointer.active = true;
+          hoverPath = detectHoverPath(pointer.x, pointer.y);
+          activePath = hoverPath;
+        });
+
+        stage.addEventListener('mouseleave', () => {
+          pointer.active = false;
+          pointer.x = -9999;
+          pointer.y = -9999;
+          hoverPath = null;
+          activePath = null;
+        });
+
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'hidden') {
+            running = false;
+            cancelAnimationFrame(raf);
+          } else {
+            running = true;
+            last = performance.now();
+            raf = requestAnimationFrame(tick);
+          }
+        });
+
+        const ro = new ResizeObserver(setCanvasSize);
+        ro.observe(stage);
+
+        setCanvasSize();
+        if (level < 3) {
+          raf = requestAnimationFrame(tick);
+        } else {
+          render(16);
+        }
+      })();
+    </script>
+  </body>
+</html>
