@@ -157,7 +157,10 @@ struct CodexHistorySuite {
 }
 
 @MainActor
-private func makeSignedInState() -> AppState {
+private func makeSignedInState(settingsDir: URL) -> AppState {
+    // Isolate settings persistence to a temp dir so applyProfile()/persist() never
+    // touch the user's real settings.json during tests.
+    SettingsStore.directoryOverride = settingsDir
     let upstream = CopilotUpstream(tokens: CopilotTokenStore(readGitHubToken: { "unused" }))
     return AppState(
         settings: AppSettings(),
@@ -175,9 +178,13 @@ private func makeSignedInState() -> AppState {
 @Test @MainActor func applyingCodexProfileWithPriorProvidersSetsPendingMigration() throws {
     let home = try makeCodexFixture(rows: [("agent-maestro", 0, "x"), ("agent-maestro", 0, "y")])
     ConfigWriter.homeOverride = home
-    defer { ConfigWriter.homeOverride = nil; try? FileManager.default.removeItem(at: home) }
+    defer {
+        ConfigWriter.homeOverride = nil
+        SettingsStore.directoryOverride = nil
+        try? FileManager.default.removeItem(at: home)
+    }
 
-    let state = makeSignedInState()
+    let state = makeSignedInState(settingsDir: home)
     state.applyProfile(Profile(name: "Codex · gpt-5", client: .codexCLI, model: "gpt-5"))
 
     let prompt = try #require(state.pendingMigration)
@@ -190,9 +197,13 @@ private func makeSignedInState() -> AppState {
 @Test @MainActor func applyingClaudeProfileNeverPrompts() throws {
     let home = try makeCodexFixture(rows: [("agent-maestro", 0, "x")])
     ConfigWriter.homeOverride = home
-    defer { ConfigWriter.homeOverride = nil; try? FileManager.default.removeItem(at: home) }
+    defer {
+        ConfigWriter.homeOverride = nil
+        SettingsStore.directoryOverride = nil
+        try? FileManager.default.removeItem(at: home)
+    }
 
-    let state = makeSignedInState()
+    let state = makeSignedInState(settingsDir: home)
     state.applyProfile(Profile(name: "Claude", client: .claudeCode, model: "claude-sonnet-4"))
     #expect(state.pendingMigration == nil)
 }
@@ -216,6 +227,74 @@ private func makeSignedInState() -> AppState {
     let settings = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     let env = try #require(settings["env"] as? [String: Any])
     #expect(env["ANTHROPIC_MODEL"] as? String == "gpt-5.5")
+}
+
+@Test func applyCodexPreservesModelKeyInsideUserTable() throws {
+    let tempHome = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let codex = tempHome.appendingPathComponent(".codex", isDirectory: true)
+    try FileManager.default.createDirectory(at: codex, withIntermediateDirectories: true)
+    ConfigWriter.homeOverride = tempHome
+    defer {
+        ConfigWriter.homeOverride = nil
+        try? FileManager.default.removeItem(at: tempHome)
+    }
+
+    // A user config with a top-level model AND a model key inside a user table.
+    let existing = """
+    model = "old-top"
+    model_provider = "some-other"
+
+    [profiles.deep]
+    model = "gpt-4"
+    model_context_window = 128000
+    approval_policy = "on-request"
+    """
+    try existing.write(to: ConfigWriter.codexConfigPath, atomically: true, encoding: .utf8)
+
+    let endpoint = ConfigWriter.Endpoint(host: "127.0.0.1", port: 10086, apiKey: "k")
+    try ConfigWriter.applyCodex(
+        Profile(name: "C", client: .codexCLI, model: "gpt-5.5", contextWindow: 1_050_000),
+        endpoint: endpoint)
+
+    let out = try String(contentsOf: ConfigWriter.codexConfigPath, encoding: .utf8)
+    // The user table's model + context_window must survive.
+    #expect(out.contains("[profiles.deep]"))
+    #expect(out.contains("model = \"gpt-4\""))
+    #expect(out.contains("model_context_window = 128000"))
+    #expect(out.contains("approval_policy = \"on-request\""))
+    // Our managed provider + top-level model is written.
+    #expect(out.contains("model = \"gpt-5.5\""))
+    #expect(out.contains("[model_providers.copilot-bridge]"))
+    // The old top-level managed keys are replaced, not duplicated.
+    #expect(!out.contains("old-top"))
+    #expect(!out.contains("some-other"))
+}
+
+@Test func savingEmptyProfilesOverExistingBacksUpFirst() throws {
+    let tempHome = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let supportDir = tempHome.appendingPathComponent("Support", isDirectory: true)
+    try FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
+    ConfigWriter.homeOverride = tempHome
+    SettingsStore.directoryOverride = supportDir
+    defer {
+        ConfigWriter.homeOverride = nil
+        SettingsStore.directoryOverride = nil
+        try? FileManager.default.removeItem(at: tempHome)
+    }
+
+    // First save with a profile.
+    var withProfile = AppSettings()
+    withProfile.profiles = [Profile(name: "C", client: .codexCLI, model: "gpt-5.5")]
+    SettingsStore.save(withProfile)
+
+    // Now save empty profiles over it — should trigger a backup of the old file.
+    SettingsStore.save(AppSettings())
+
+    let backups = tempHome.appendingPathComponent("Library/Application Support/CopilotBridge/backups", isDirectory: true)
+    let files = (try? FileManager.default.contentsOfDirectory(atPath: backups.path)) ?? []
+    #expect(files.contains { $0.hasPrefix("settings.json.") && $0.hasSuffix(".bak") })
 }
 
 }

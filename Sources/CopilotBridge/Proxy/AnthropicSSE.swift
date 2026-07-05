@@ -6,13 +6,13 @@ struct AnthropicStreamEncoder {
     let model: String
     private let messageID = "msg_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
 
-    private var startedMessage = false
-    private var textBlockOpen = false
     private var contentIndex = -1
+    /// The single currently-open content block index, if any. Anthropic requires each
+    /// block to be closed with content_block_stop before the next one opens, so we track
+    /// exactly one open block and close it before starting another (text or tool).
+    private var openBlockIndex: Int?
     // Tracks tool-call blocks by their OpenAI streaming index.
     private var toolBlocks: [Int: Int] = [:]   // openAIIndex -> anthropic content index
-    private var toolNames: [Int: String] = [:]
-    private var promptTokens = 0
     private var completionTokens = 0
     private var finishReason: String?
 
@@ -25,8 +25,14 @@ struct AnthropicStreamEncoder {
         return "event: \(type)\ndata: \(data)\n\n"
     }
 
+    /// Emits content_block_stop for the currently-open block, if any.
+    private mutating func closeOpenBlock() -> String {
+        guard let idx = openBlockIndex else { return "" }
+        openBlockIndex = nil
+        return Self.event("content_block_stop", ["type": "content_block_stop", "index": idx])
+    }
+
     mutating func start() -> String {
-        startedMessage = true
         let payload: [String: Any] = [
             "type": "message_start",
             "message": [
@@ -47,18 +53,20 @@ struct AnthropicStreamEncoder {
     mutating func handle(_ obj: [String: Any]) -> String {
         var out = ""
         if let usage = obj["usage"] as? [String: Any] {
-            promptTokens = usage["prompt_tokens"] as? Int ?? promptTokens
             completionTokens = usage["completion_tokens"] as? Int ?? completionTokens
         }
         guard let choice = (obj["choices"] as? [[String: Any]])?.first else { return out }
         if let fr = choice["finish_reason"] as? String { finishReason = fr }
         let delta = choice["delta"] as? [String: Any] ?? [:]
 
-        // Text delta.
+        // Text delta. If the open block is a tool block (or any other), close it first.
         if let text = delta["content"] as? String, !text.isEmpty {
+            let textBlockOpen = openBlockIndex != nil && openBlockIndex == contentIndex && isTextBlock
             if !textBlockOpen {
+                out += closeOpenBlock()
                 contentIndex += 1
-                textBlockOpen = true
+                openBlockIndex = contentIndex
+                isTextBlock = true
                 out += Self.event("content_block_start", [
                     "type": "content_block_start",
                     "index": contentIndex,
@@ -78,15 +86,13 @@ struct AnthropicStreamEncoder {
                 let idx = call["index"] as? Int ?? 0
                 let fn = call["function"] as? [String: Any] ?? [:]
                 if toolBlocks[idx] == nil {
-                    // Close any open text block first.
-                    if textBlockOpen {
-                        out += Self.event("content_block_stop", ["type": "content_block_stop", "index": contentIndex])
-                        textBlockOpen = false
-                    }
+                    // Close whatever block is currently open (text or a previous tool).
+                    out += closeOpenBlock()
                     contentIndex += 1
                     toolBlocks[idx] = contentIndex
+                    openBlockIndex = contentIndex
+                    isTextBlock = false
                     let name = fn["name"] as? String ?? ""
-                    toolNames[idx] = name
                     out += Self.event("content_block_start", [
                         "type": "content_block_start",
                         "index": contentIndex,
@@ -114,13 +120,7 @@ struct AnthropicStreamEncoder {
     /// Emits closing events (block stop, message_delta with usage, message_stop).
     mutating func finish() -> String {
         var out = ""
-        if textBlockOpen {
-            out += Self.event("content_block_stop", ["type": "content_block_stop", "index": contentIndex])
-            textBlockOpen = false
-        }
-        for (_, blockIdx) in toolBlocks.sorted(by: { $0.value < $1.value }) {
-            out += Self.event("content_block_stop", ["type": "content_block_stop", "index": blockIdx])
-        }
+        out += closeOpenBlock()
         out += Self.event("message_delta", [
             "type": "message_delta",
             "delta": [
@@ -133,5 +133,5 @@ struct AnthropicStreamEncoder {
         return out
     }
 
-    var didStart: Bool { startedMessage }
+    private var isTextBlock = false
 }

@@ -14,14 +14,12 @@ enum CopilotAuth {
         let userCode: String
         let verificationURI: String
         let interval: Int
-        let expiresIn: Int
 
         enum CodingKeys: String, CodingKey {
             case deviceCode = "device_code"
             case userCode = "user_code"
             case verificationURI = "verification_uri"
             case interval
-            case expiresIn = "expires_in"
         }
     }
 

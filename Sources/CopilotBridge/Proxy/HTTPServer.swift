@@ -1,6 +1,20 @@
 import Foundation
 import Network
 
+/// A tiny thread-safe one-shot flag (set-once), used to disarm a connection's idle
+/// deadline once its request has been dispatched.
+private final class ManagedAtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+    func set() {
+        lock.lock(); value = true; lock.unlock()
+    }
+}
+
 /// A minimal HTTP/1.1 server on Network.framework (no third-party deps).
 /// Supports request bodies, chunk-free responses, and streamed SSE responses.
 final class HTTPServer: @unchecked Sendable {
@@ -60,8 +74,37 @@ final class HTTPServer: @unchecked Sendable {
     private let failureLock = NSLock()
     private var onFailure: (@Sendable (String) -> Void)?
 
+    /// Live accepted connections, so stop() can tear them down and we don't leak
+    /// sockets across proxy restarts.
+    private let connectionsLock = NSLock()
+    private var connections = Set<ObjectIdentifier>()
+    private var connectionByID: [ObjectIdentifier: NWConnection] = [:]
+
+    /// Cap on bytes buffered while still waiting for a complete request head+body, to
+    /// bound memory against a client that never finishes its request.
+    private static let maxRequestBytes = 1 << 20   // 1 MiB
+    /// Idle deadline: if a full request isn't parsed within this window, drop the
+    /// connection (defends against slowloris / half-open connections).
+    private static let requestReadTimeout: TimeInterval = 30
+
     init(handler: @escaping @Sendable (Request) async -> Response) {
         self.handler = handler
+    }
+
+    private func register(_ conn: NWConnection) {
+        let id = ObjectIdentifier(conn)
+        connectionsLock.lock()
+        connections.insert(id)
+        connectionByID[id] = conn
+        connectionsLock.unlock()
+    }
+
+    private func unregister(_ conn: NWConnection) {
+        let id = ObjectIdentifier(conn)
+        connectionsLock.lock()
+        connections.remove(id)
+        connectionByID[id] = nil
+        connectionsLock.unlock()
     }
 
     /// Sets the callback fired when the listener enters `.failed`/`.waiting`.
@@ -118,19 +161,55 @@ final class HTTPServer: @unchecked Sendable {
         failureLock.unlock()
         listener?.cancel()
         listener = nil
+
+        // Tear down any in-flight connections so we don't leak sockets across restarts.
+        connectionsLock.lock()
+        let live = Array(connectionByID.values)
+        connections.removeAll()
+        connectionByID.removeAll()
+        connectionsLock.unlock()
+        for conn in live { conn.cancel() }
     }
 
     private func accept(_ conn: NWConnection) {
+        register(conn)
+        conn.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .cancelled, .failed:
+                self?.unregister(conn)
+            default:
+                break
+            }
+        }
         conn.start(queue: queue)
-        receiveRequest(conn, buffer: Data())
+
+        // Idle/read deadline: if no complete request is parsed in time, drop it.
+        // Cancelled once a full request is dispatched (so long SSE streams aren't cut).
+        let armed = ManagedAtomicFlag()
+        queue.asyncAfter(deadline: .now() + Self.requestReadTimeout) { [weak conn] in
+            if armed.isSet { return }
+            conn?.cancel()
+        }
+        receiveRequest(conn, buffer: Data(), readTimeoutArmed: armed)
     }
 
-    private func receiveRequest(_ conn: NWConnection, buffer: Data) {
+    private func receiveRequest(_ conn: NWConnection, buffer: Data, readTimeoutArmed: ManagedAtomicFlag) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             var acc = buffer
             if let data { acc.append(data) }
+            if acc.count > Self.maxRequestBytes {
+                // Refuse oversized/never-terminating requests.
+                readTimeoutArmed.set()
+                Task {
+                    await self.send(.text(413, "request too large"), on: conn)
+                }
+                return
+            }
             if let parsed = self.tryParse(acc, conn: conn) {
+                // A full request is in hand; disarm the idle deadline so streaming
+                // responses aren't interrupted, then handle it.
+                readTimeoutArmed.set()
                 Task {
                     let response = await self.handler(parsed)
                     await self.send(response, on: conn)
@@ -141,7 +220,7 @@ final class HTTPServer: @unchecked Sendable {
                 conn.cancel()
                 return
             }
-            self.receiveRequest(conn, buffer: acc)
+            self.receiveRequest(conn, buffer: acc, readTimeoutArmed: readTimeoutArmed)
         }
     }
 
@@ -172,7 +251,9 @@ final class HTTPServer: @unchecked Sendable {
             ? data.subdata(in: bodyStart..<(bodyStart + contentLength))
             : Data()
 
-        var isLoopback = true
+        // Default to NOT loopback: if the remote endpoint is unknown/unavailable, treat
+        // the request as remote so LAN auth is enforced (fail closed, not open).
+        var isLoopback = false
         if case let .hostPort(host, _)? = conn.currentPath?.remoteEndpoint {
             switch host {
             case .ipv4(let a): isLoopback = a.isLoopback

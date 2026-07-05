@@ -34,10 +34,13 @@ enum CopilotModelID {
             return model
         }
 
+        // Fuzzy fallback: only a case-insensitive EXACT match on any identifier. We
+        // deliberately avoid prefix/substring matching, which would map e.g. "gpt-4"
+        // onto "gpt-4o" or "gpt-4.1". If nothing matches exactly, return nil and let
+        // the caller pass the requested id through to the upstream unchanged.
+        let target = stripped.lowercased()
         return models.first { model in
-            identifiers(for: model).contains { identifier in
-                identifier.contains(stripped) || stripped.contains(identifier)
-            }
+            identifiers(for: model).contains { $0.lowercased() == target }
         }
     }
 

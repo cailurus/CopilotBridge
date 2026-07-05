@@ -109,6 +109,27 @@ final class AppState: ObservableObject {
         )
     }
 
+    /// Switches the bind mode. Turning on LAN with no key generates a secure one
+    /// (safe default), but the user may still clear it afterwards to run without
+    /// auth — their machine, their call.
+    func setBindMode(_ mode: BindMode) {
+        settings.bindMode = mode
+        if mode == .lan, settings.accessKey.isEmpty {
+            settings.accessKey = Self.generateAccessKey()
+        }
+        persist()
+    }
+
+    static func generateAccessKey() -> String {
+        (UUID().uuidString + UUID().uuidString).replacingOccurrences(of: "-", with: "")
+    }
+
+    /// True when LAN mode is on but no access key is set, i.e. any device on the
+    /// network can use the proxy unauthenticated. Drives the inline warning.
+    var lanIsUnauthenticated: Bool {
+        settings.bindMode == .lan && settings.accessKey.isEmpty
+    }
+
     // MARK: Auth
 
     @discardableResult
@@ -169,10 +190,6 @@ final class AppState: ObservableObject {
         Task { await invalidateCopilotToken() }
         loginStatus = .signedOut
         stopProxy()
-    }
-
-    func refreshModels(forceRefresh: Bool = false) async {
-        availableModels = await fetchAvailableModels(forceRefresh)
     }
 
     func forceRefreshModels() async throws {

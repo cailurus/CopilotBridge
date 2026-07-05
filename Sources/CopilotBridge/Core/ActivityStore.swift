@@ -31,13 +31,6 @@ final class ActivityStore: ObservableObject {
     static func dayKey(_ date: Date) -> String { dayFormatter.string(from: date) }
     static func date(fromDayKey key: String) -> Date? { dayFormatter.date(from: key) }
 
-    /// Records one request against `model` on the current local day.
-    func record(model: String, on date: Date = Date()) {
-        let key = Self.dayKey(date)
-        days[key, default: [:]][model, default: 0] += 1
-        save()
-    }
-
     /// Records a batch of per-model counts on the current local day with a single save.
     func record(counts: [String: Int], on date: Date = Date()) {
         guard !counts.isEmpty else { return }

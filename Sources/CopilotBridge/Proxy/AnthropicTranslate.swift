@@ -102,6 +102,8 @@ enum AnthropicTranslate {
         body["stream"] = stream
         if let mt = anthropic["max_tokens"] as? Int { body["max_tokens"] = mt }
         if let temp = anthropic["temperature"] as? Double { body["temperature"] = temp }
+        if let topP = anthropic["top_p"] as? Double { body["top_p"] = topP }
+        if let stop = anthropic["stop_sequences"] as? [String], !stop.isEmpty { body["stop"] = stop }
 
         // Tools.
         if let tools = anthropic["tools"] as? [[String: Any]], !tools.isEmpty {
@@ -115,6 +117,7 @@ enum AnthropicTranslate {
                     ],
                 ]
             }
+            body["tool_choice"] = mapToolChoice(anthropic["tool_choice"])
         }
         // Reasoning effort (Anthropic thinking -> reasoning_effort).
         if let thinking = anthropic["thinking"] as? [String: Any],
@@ -167,6 +170,21 @@ enum AnthropicTranslate {
         case "tool_calls": return "tool_use"
         case "length": return "max_tokens"
         default: return "end_turn"
+        }
+    }
+
+    /// Maps Anthropic tool_choice to the OpenAI equivalent. Defaults to "auto".
+    static func mapToolChoice(_ raw: Any?) -> Any {
+        guard let choice = raw as? [String: Any],
+              let type = choice["type"] as? String else { return "auto" }
+        switch type {
+        case "any": return "required"
+        case "tool":
+            if let name = choice["name"] as? String {
+                return ["type": "function", "function": ["name": name]]
+            }
+            return "required"
+        default: return "auto"   // "auto"
         }
     }
 

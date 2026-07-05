@@ -109,7 +109,9 @@ struct GeneralSettingsView: View {
                 }
 
                 settingRow("Host") {
-                    Picker("Host", selection: $state.settings.bindMode) {
+                    Picker("Host", selection: Binding(
+                        get: { state.settings.bindMode },
+                        set: { state.setBindMode($0) })) {
                         ForEach(BindMode.allCases) { mode in
                             Text(mode.title).tag(mode)
                         }
@@ -125,7 +127,7 @@ struct GeneralSettingsView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 240)
                             Button("Generate") {
-                                state.settings.accessKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                                state.settings.accessKey = AppState.generateAccessKey()
                                 state.persist()
                             }
                         }
@@ -133,11 +135,21 @@ struct GeneralSettingsView: View {
 
                     HStack {
                         Spacer(minLength: 112)
-                        Text("Other devices connect to http://\(localIPAddress()):\(state.settings.port) and must send the access key. This Mac still connects with no key.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.trailing)
-                            .fixedSize(horizontal: false, vertical: true)
+                        if state.lanIsUnauthenticated {
+                            Label(
+                                "No access key set — any device on your network can use your Copilot through this proxy.",
+                                systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .multilineTextAlignment(.trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text("Other devices connect to http://\(localIPAddress()):\(state.settings.port) and must send the access key. This Mac still connects with no key.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
 
@@ -186,7 +198,6 @@ struct GeneralSettingsView: View {
             syncPortText()
         }
         .onChange(of: state.settings.bindMode) { _, _ in
-            state.persist()
             if case .running = state.proxyStatus { state.restartProxy() }
         }
         .onChange(of: state.settings.accessKey) { _, _ in state.persist() }

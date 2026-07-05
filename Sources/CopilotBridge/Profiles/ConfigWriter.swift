@@ -105,7 +105,7 @@ enum ConfigWriter {
                 inOurTable = trimmed == "[model_providers.\(providerID)]"
             }
             if inOurTable { continue }
-            if let key = topLevelKey(line), managedTopKeys.contains(key) { continue }
+            if !inTable, let key = topLevelKey(line), managedTopKeys.contains(key) { continue }
             if inTable { keptTables.append(line) } else { keptTopKeys.append(line) }
         }
 
@@ -149,14 +149,16 @@ enum ConfigWriter {
         guard let existing = try? String(contentsOf: path, encoding: .utf8) else { return }
         backup(path)
         var kept: [String] = []
+        var inTable = false
         var inOurTable = false
         for line in existing.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("[") {
+                inTable = true
                 inOurTable = trimmed == "[model_providers.\(providerID)]"
             }
             if inOurTable { continue }
-            if let key = topLevelKey(line), managedTopKeys.contains(key) { continue }
+            if !inTable, let key = topLevelKey(line), managedTopKeys.contains(key) { continue }
             kept.append(line)
         }
         let body = kept.joined(separator: "\n")
@@ -205,7 +207,7 @@ enum ConfigWriter {
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: path)
+            try data.write(to: path, options: [.atomic])
         } catch {
             throw WriterError.ioFailed("write settings.json: \(error.localizedDescription)")
         }
@@ -229,7 +231,7 @@ enum ConfigWriter {
         settings["env"] = env
         if let out = try? JSONSerialization.data(
             withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-            try? out.write(to: path)
+            try? out.write(to: path, options: [.atomic])
         }
     }
 
@@ -255,7 +257,7 @@ enum ConfigWriter {
             obj["hasCompletedOnboarding"] = true
         }
         if let out = try? JSONSerialization.data(withJSONObject: obj, options: .prettyPrinted) {
-            try? out.write(to: path)
+            try? out.write(to: path, options: [.atomic])
         }
     }
 }
