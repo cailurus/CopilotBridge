@@ -5,6 +5,7 @@ import SwiftUI
 struct ActivityDashboardView: View {
     @EnvironmentObject var state: AppState
     @ObservedObject private var activity: ActivityStore
+    @State private var unit: ActivityStore.Unit = .requests
 
     init(activity: ActivityStore) {
         _activity = ObservedObject(wrappedValue: activity)
@@ -12,6 +13,7 @@ struct ActivityDashboardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            unitPicker
             summary
             heatmapCard
             breakdownCard
@@ -21,13 +23,31 @@ struct ActivityDashboardView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    private var unitPicker: some View {
+        Picker("Show", selection: $unit) {
+            ForEach(ActivityStore.Unit.allCases) { u in
+                Text(u.title).tag(u)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+    }
+
+    /// Formats a value for the current unit: plain integer for requests, compact
+    /// (1.2K / 3.4M) for tokens.
+    private func display(_ value: Int) -> String {
+        guard unit == .tokens else { return "\(value)" }
+        return formatCompactCount(value)
+    }
+
     // MARK: Summary
 
     private var summary: some View {
         HStack(spacing: 8) {
-            stat("Total", "\(activity.totalRequests)", "number.circle")
-            stat("Today", "\(activity.todayCount)", "calendar")
-            stat("Models", "\(activity.modelTotals.count)", "cube.box")
+            stat("Total", display(activity.total(unit)), "number.circle")
+            stat("Today", display(activity.today(unit)), "calendar")
+            stat("Models", "\(activity.modelTotals(unit).count)", "cube.box")
             stat("Active days", "\(activity.activeDays)", "flame")
         }
     }
@@ -48,11 +68,11 @@ struct ActivityDashboardView: View {
     private var heatmapCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Recent activity").font(.headline)
-            if activity.totalRequests == 0 {
+            if activity.total(unit) == 0 {
                 emptyState
             } else {
                 GeometryReader { geo in
-                    ContributionHeatmap(activity: activity, availableWidth: geo.size.width)
+                    ContributionHeatmap(activity: activity, unit: unit, availableWidth: geo.size.width)
                 }
                 .frame(height: 112)
             }
@@ -63,7 +83,7 @@ struct ActivityDashboardView: View {
     }
 
     private var emptyState: some View {
-        Text("No requests yet. Point a client at the proxy to see activity here.")
+        Text("No activity yet. Point a client at the proxy to see activity here.")
             .font(.caption).foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, minHeight: 62, alignment: .center)
     }
@@ -73,7 +93,7 @@ struct ActivityDashboardView: View {
     private var breakdownCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("By model").font(.headline)
-            let totals = activity.modelTotals
+            let totals = activity.modelTotals(unit)
             if totals.isEmpty {
                 Text("No model activity recorded.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -96,7 +116,7 @@ struct ActivityDashboardView: View {
             HStack {
                 Text(model).font(.caption.monospaced()).lineLimit(1)
                 Spacer()
-                Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text(display(count)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             GeometryReader { geo in
                 let frac = max > 0 ? Double(count) / Double(max) : 0
@@ -112,9 +132,10 @@ struct ActivityDashboardView: View {
 }
 
 /// GitHub-style contribution grid: columns are weeks (oldest → newest), rows are
-/// weekdays (Sun → Sat). Cell color intensity scales with that day's request count.
+/// weekdays (Sun → Sat). Cell color intensity scales with that day's value in `unit`.
 struct ContributionHeatmap: View {
     @ObservedObject var activity: ActivityStore
+    let unit: ActivityStore.Unit
     let availableWidth: CGFloat
 
     private let cell: CGFloat = 10
@@ -151,9 +172,9 @@ struct ContributionHeatmap: View {
         return columns
     }
 
-    /// Highest single-day count in the window, for scaling intensity.
+    /// Highest single-day value in the window, for scaling intensity.
     private var maxDaily: Int {
-        grid.flatMap { $0 }.compactMap { $0 }.map { activity.count(on: $0) }.max() ?? 0
+        grid.flatMap { $0 }.compactMap { $0 }.map { activity.count(on: $0, unit: unit) }.max() ?? 0
     }
 
     var body: some View {
@@ -185,11 +206,12 @@ struct ContributionHeatmap: View {
     @ViewBuilder
     private func cellView(_ date: Date?) -> some View {
         if let date {
-            let count = activity.count(on: date)
+            let count = activity.count(on: date, unit: unit)
+            let noun = unit == .requests ? "request" : "token"
             RoundedRectangle(cornerRadius: 2)
                 .fill(color(for: count))
                 .frame(width: cell, height: cell)
-                .help("\(ActivityStore.dayKey(date)): \(count) request\(count == 1 ? "" : "s")")
+                .help("\(ActivityStore.dayKey(date)): \(count) \(noun)\(count == 1 ? "" : "s")")
         } else {
             RoundedRectangle(cornerRadius: 2)
                 .fill(Color.clear)

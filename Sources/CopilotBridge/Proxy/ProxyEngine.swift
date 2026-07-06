@@ -12,9 +12,11 @@ actor ProxyEngine {
     private var snapshot: Snapshot
     private(set) var lastError: String?
     private(set) var requestCount = 0
-    /// Per-model counts accumulated since the last drain. AppState polls and clears
-    /// this to feed the persisted ActivityStore, keeping recording off the hot path.
+    /// Per-model request counts accumulated since the last drain. AppState polls and
+    /// clears this to feed the persisted ActivityStore, keeping recording off the hot path.
     private var pendingModelCounts: [String: Int] = [:]
+    /// Per-model token counts (from upstream `usage`) since the last drain.
+    private var pendingModelTokens: [String: Int] = [:]
 
     init(upstream: CopilotUpstream, snapshot: Snapshot) {
         self.upstream = upstream
@@ -25,16 +27,53 @@ actor ProxyEngine {
 
     func stats() -> (count: Int, lastError: String?) { (requestCount, lastError) }
 
-    /// Returns per-model counts since the last call and resets the buffer.
-    func drainModelCounts() -> [String: Int] {
-        defer { pendingModelCounts.removeAll(keepingCapacity: true) }
-        return pendingModelCounts
+    /// Returns per-model request + token counts since the last call and resets buffers.
+    func drainModelStats() -> (requests: [String: Int], tokens: [String: Int]) {
+        defer {
+            pendingModelCounts.removeAll(keepingCapacity: true)
+            pendingModelTokens.removeAll(keepingCapacity: true)
+        }
+        return (pendingModelCounts, pendingModelTokens)
     }
 
     /// Records one served request against its resolved model.
     private func tally(_ model: String) {
         requestCount += 1
         pendingModelCounts[model, default: 0] += 1
+    }
+
+    /// Adds observed upstream token usage to the resolved model.
+    private func tallyTokens(_ model: String, _ tokens: Int) {
+        guard tokens > 0 else { return }
+        pendingModelTokens[model, default: 0] += tokens
+    }
+
+    // MARK: Usage extraction (pure, unit-testable)
+
+    /// Extracts total token usage from a full (non-stream) OpenAI/Anthropic JSON body.
+    static func extractUsageTokens(fromJSON data: Data) -> Int? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return usageTokens(obj["usage"])
+    }
+
+    /// Extracts token usage from a single SSE `data:` frame payload (JSON string).
+    static func extractUsageTokens(fromFramePayload payload: String) -> Int? {
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { return nil }
+        // OpenAI puts usage at the top level; Anthropic message_start nests it under "message".
+        if let t = usageTokens(obj["usage"]) { return t }
+        if let msg = obj["message"] as? [String: Any] { return usageTokens(msg["usage"]) }
+        return nil
+    }
+
+    /// Reads a `usage` object: prefer OpenAI `total_tokens`, else sum Anthropic
+    /// input_tokens + output_tokens.
+    private static func usageTokens(_ raw: Any?) -> Int? {
+        guard let usage = raw as? [String: Any] else { return nil }
+        if let total = usage["total_tokens"] as? Int { return total }
+        let input = usage["input_tokens"] as? Int ?? usage["prompt_tokens"] as? Int ?? 0
+        let output = usage["output_tokens"] as? Int ?? usage["completion_tokens"] as? Int ?? 0
+        let sum = input + output
+        return sum > 0 ? sum : nil
     }
 
     // MARK: Model resolution
@@ -114,9 +153,11 @@ actor ProxyEngine {
             requestCount += 1
             return .json(400, ["error": ["message": "invalid JSON body"]])
         }
+        var resolvedModel = ""
         if let model = body["model"] as? String {
             let resolved = await resolveModel(model)
             body["model"] = resolved
+            resolvedModel = resolved
             tally(resolved)
         } else {
             requestCount += 1
@@ -125,7 +166,7 @@ actor ProxyEngine {
         guard let outBody = try? JSONSerialization.data(withJSONObject: body) else {
             return .json(400, ["error": ["message": "encode failed"]])
         }
-        return await passthrough(outBody, stream: stream) { try await self.upstream.chat(body: $0) }
+        return await passthrough(outBody, stream: stream, model: resolvedModel) { try await self.upstream.chat(body: $0) }
     }
 
     // MARK: OpenAI Responses (Codex / Codex CLI default wire_api)
@@ -135,9 +176,11 @@ actor ProxyEngine {
             requestCount += 1
             return .json(400, ["error": ["message": "invalid JSON body"]])
         }
+        var resolvedModel = ""
         if let model = body["model"] as? String {
             let resolved = await resolveModel(model)
             body["model"] = resolved
+            resolvedModel = resolved
             tally(resolved)
         } else {
             requestCount += 1
@@ -146,13 +189,14 @@ actor ProxyEngine {
         guard let outBody = try? JSONSerialization.data(withJSONObject: body) else {
             return .json(400, ["error": ["message": "encode failed"]])
         }
-        return await passthrough(outBody, stream: stream) { try await self.upstream.responses(body: $0) }
+        return await passthrough(outBody, stream: stream, model: resolvedModel) { try await self.upstream.responses(body: $0) }
     }
 
     /// Streams an upstream OpenAI-shaped response straight back to the client.
     private func passthrough(
         _ body: Data,
         stream: Bool,
+        model: String,
         call: @escaping @Sendable (Data) async throws -> UpstreamResponse
     ) async -> HTTPServer.Response {
         do {
@@ -175,19 +219,26 @@ actor ProxyEngine {
                         // SSE frame, so clients (Codex) never see `response.completed`
                         // and report "stream closed before response.completed".
                         var buffer = Data()
+                        var observedTokens = 0
                         do {
                             for try await byte in resp.bytes {
                                 buffer.append(byte)
                                 if byte == 0x0A {
                                     await writer.write(buffer)
+                                    if let t = Self.sniffUsage(inLine: buffer) { observedTokens = max(observedTokens, t) }
                                     buffer.removeAll(keepingCapacity: true)
                                 }
                             }
                         } catch {}
-                        if !buffer.isEmpty { await writer.write(buffer) }
+                        if !buffer.isEmpty {
+                            await writer.write(buffer)
+                            if let t = Self.sniffUsage(inLine: buffer) { observedTokens = max(observedTokens, t) }
+                        }
+                        if observedTokens > 0 { await self.tallyTokens(model, observedTokens) }
                     })
             } else {
                 let data = await collect(resp.bytes)
+                if let t = Self.extractUsageTokens(fromJSON: data) { tallyTokens(model, t) }
                 return HTTPServer.Response(status: 200,
                                           headers: ["Content-Type": resp.contentType],
                                           body: data, stream: nil)
@@ -196,6 +247,16 @@ actor ProxyEngine {
             lastError = error.localizedDescription
             return .json(502, ["error": ["message": error.localizedDescription]])
         }
+    }
+
+    /// Cheap per-line usage sniff for SSE forwarding: only parses lines that look like a
+    /// `data:` frame containing the substring `usage`, so the hot path stays fast.
+    private static func sniffUsage(inLine data: Data) -> Int? {
+        guard let line = String(data: data, encoding: .utf8) else { return nil }
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("data:"), trimmed.contains("usage") else { return nil }
+        let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        return extractUsageTokens(fromFramePayload: payload)
     }
 
     // MARK: Anthropic messages (Claude Code) -> OpenAI chat translation
@@ -217,7 +278,7 @@ actor ProxyEngine {
                 return .json(400, ["error": ["message": "encode failed"]])
             }
             let extraHeaders = nativeMessagesHeaders(req, payload: anthropic)
-            return await passthrough(outBody, stream: stream) {
+            return await passthrough(outBody, stream: stream, model: model) {
                 try await self.upstream.messages(body: $0, extraHeaders: extraHeaders)
             }
         }
@@ -238,6 +299,7 @@ actor ProxyEngine {
                 return anthropicStream(resp: resp, model: model)
             } else {
                 let data = await collect(resp.bytes)
+                if let t = Self.extractUsageTokens(fromJSON: data) { tallyTokens(model, t) }
                 let openai = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
                 let translated = AnthropicTranslate.fromOpenAI(openai, model: model)
                 return .json(200, translated)
@@ -258,6 +320,7 @@ actor ProxyEngine {
                 await writer.write(enc.start())
                 // Anthropic clients expect a ping soon after start.
                 await writer.write(AnthropicStreamEncoder.event("ping", ["type": "ping"]))
+                var observedTokens = 0
                 do {
                     for try await line in resp.bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
@@ -265,6 +328,7 @@ actor ProxyEngine {
                         if payload == "[DONE]" { break }
                         guard let obj = try? JSONSerialization.jsonObject(
                             with: Data(payload.utf8)) as? [String: Any] else { continue }
+                        if let t = Self.extractUsageTokens(fromFramePayload: payload) { observedTokens = max(observedTokens, t) }
                         let chunk = enc.handle(obj)
                         if !chunk.isEmpty { await writer.write(chunk) }
                     }
@@ -272,6 +336,7 @@ actor ProxyEngine {
                     // fall through to finish
                 }
                 await writer.write(enc.finish())
+                if observedTokens > 0 { await self.tallyTokens(model, observedTokens) }
             })
     }
 

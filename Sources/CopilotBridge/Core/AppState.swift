@@ -298,8 +298,8 @@ final class AppState: ObservableObject {
                 let (count, err) = await engine.stats()
                 self.requestCount = count
                 self.lastError = err
-                let byModel = await engine.drainModelCounts()
-                self.activity.record(counts: byModel)
+                let stats = await engine.drainModelStats()
+                self.activity.record(requests: stats.requests, tokens: stats.tokens)
                 if let err {
                     self.lastActivity = "Last error: \(err.prefix(80))"
                 } else if count > 0 {
