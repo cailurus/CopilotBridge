@@ -176,6 +176,9 @@ actor CopilotUpstream {
         let token = try await tokens.get()
         var req = URLRequest(url: endpoint(path, base: token.apiBaseURL))
         req.httpMethod = "POST"
+        // Large contexts and reasoning models can take well over the URLSession default
+        // (60s) to produce the first byte; a short timeout surfaces as a spurious 502.
+        req.timeoutInterval = 300
         for (k, v) in headers(token.value) { req.setValue(v, forHTTPHeaderField: k) }
         for (k, v) in extraHeaders { req.setValue(v, forHTTPHeaderField: k) }
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
