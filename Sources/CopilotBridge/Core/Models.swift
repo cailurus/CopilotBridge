@@ -141,3 +141,10 @@ func formatCompactCount(_ n: Int) -> String {
     }
     return "\(n)"
 }
+
+/// USD amount for the dashboard: `$0.00` under $1K, then `$1.2K` / `$3.4M`.
+func formatUSD(_ amount: Double) -> String {
+    if amount >= 1_000_000 { return String(format: "$%.1fM", amount / 1_000_000) }
+    if amount >= 1_000 { return String(format: "$%.1fK", amount / 1_000) }
+    return String(format: "$%.2f", amount)
+}

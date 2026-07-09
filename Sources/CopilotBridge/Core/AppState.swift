@@ -39,6 +39,8 @@ final class AppState: ObservableObject {
     /// Set after applying a Codex profile when prior threads use another provider,
     /// which drives the migration prompt sheet.
     @Published var pendingMigration: MigrationPrompt?
+    /// Latest update-check result, shown in About.
+    @Published private(set) var updateStatus: UpdateStatus = .idle
     let activity = ActivityStore()
 
     private let upstream: CopilotUpstream
@@ -98,6 +100,18 @@ final class AppState: ObservableObject {
             if signedIn, settings.autoStartProxy {
                 startProxy()
             }
+        }
+        checkForUpdates()
+    }
+
+    // MARK: Updates
+
+    func checkForUpdates() {
+        guard updateStatus != .checking else { return }
+        updateStatus = .checking
+        Task {
+            let result = await UpdateChecker.check(currentVersion: AppInfo.version)
+            self.updateStatus = result
         }
     }
 
@@ -299,7 +313,7 @@ final class AppState: ObservableObject {
                 self.requestCount = count
                 self.lastError = err
                 let stats = await engine.drainModelStats()
-                self.activity.record(requests: stats.requests, tokens: stats.tokens)
+                self.activity.record(requests: stats.requests, inputTokens: stats.input, outputTokens: stats.output)
                 if let err {
                     self.lastActivity = "Last error: \(err.prefix(80))"
                 } else if count > 0 {

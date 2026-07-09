@@ -313,20 +313,61 @@ struct GeneralSettingsView: View {
 }
 
 struct AboutView: View {
+    @EnvironmentObject var state: AppState
+
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "bolt.horizontal.circle.fill")
                 .font(.system(size: 44)).foregroundStyle(.tint)
             Text("Copilot Bridge").font(.title2.bold())
-            Text("v0.1.0").font(.caption).foregroundStyle(.secondary)
+            Text("v\(AppInfo.version)").font(.caption).foregroundStyle(.secondary)
             Text("A local proxy for your GitHub Copilot subscription.")
                 .foregroundStyle(.secondary)
+
+            updateRow
+                .padding(.top, 6)
+
             Text("Unofficial Copilot endpoints — for your own subscription.")
                 .font(.caption).foregroundStyle(.tertiary)
         }
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding()
-        .padding(.top, 72)
+        .padding(.top, 60)
+    }
+
+    @ViewBuilder
+    private var updateRow: some View {
+        switch state.updateStatus {
+        case .checking:
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text("Checking for updates…").font(.caption).foregroundStyle(.secondary)
+            }
+        case .available(let version, let url):
+            VStack(spacing: 6) {
+                Text("Version \(version) is available")
+                    .font(.callout).foregroundStyle(.primary)
+                Button("Download") {
+                    if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        case .upToDate:
+            HStack(spacing: 6) {
+                Text("You're up to date.").font(.caption).foregroundStyle(.secondary)
+                Button("Check again") { state.checkForUpdates() }
+                    .buttonStyle(.link).font(.caption)
+            }
+        case .failed:
+            HStack(spacing: 6) {
+                Text("Couldn't check for updates.").font(.caption).foregroundStyle(.secondary)
+                Button("Retry") { state.checkForUpdates() }
+                    .buttonStyle(.link).font(.caption)
+            }
+        case .idle:
+            Button("Check for Updates") { state.checkForUpdates() }
+                .buttonStyle(.bordered)
+        }
     }
 }

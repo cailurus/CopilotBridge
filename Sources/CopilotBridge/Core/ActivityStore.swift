@@ -13,14 +13,39 @@ import Foundation
 final class ActivityStore: ObservableObject {
     struct Stat: Codable, Equatable {
         var requests: Int = 0
+        /// Total tokens = input + output. Kept for the heatmap/back-compat.
         var tokens: Int = 0
+        var inputTokens: Int = 0
+        var outputTokens: Int = 0
+
+        init(requests: Int = 0, tokens: Int = 0, inputTokens: Int = 0, outputTokens: Int = 0) {
+            self.requests = requests
+            self.tokens = tokens
+            self.inputTokens = inputTokens
+            self.outputTokens = outputTokens
+        }
+
+        /// Tolerates older files that only had `requests`/`tokens` (split fields absent).
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            requests = (try? c.decode(Int.self, forKey: .requests)) ?? 0
+            tokens = (try? c.decode(Int.self, forKey: .tokens)) ?? 0
+            inputTokens = (try? c.decode(Int.self, forKey: .inputTokens)) ?? 0
+            outputTokens = (try? c.decode(Int.self, forKey: .outputTokens)) ?? 0
+        }
     }
 
     /// The metric the dashboard is currently showing.
     enum Unit: String, CaseIterable, Identifiable {
-        case requests, tokens
+        case requests, tokens, cost
         var id: String { rawValue }
-        var title: String { self == .requests ? "Requests" : "Tokens" }
+        var title: String {
+            switch self {
+            case .requests: return "Requests"
+            case .tokens: return "Tokens"
+            case .cost: return "Cost"
+            }
+        }
     }
 
     /// day (yyyy-MM-dd, local) -> model id -> stat
@@ -50,16 +75,20 @@ final class ActivityStore: ObservableObject {
         unit == .requests ? stat.requests : stat.tokens
     }
 
-    /// Records a batch of per-model request counts and token counts on the current local
-    /// day with a single save.
-    func record(requests: [String: Int], tokens: [String: Int], on date: Date = Date()) {
-        let models = Set(requests.keys).union(tokens.keys)
+    /// Records a batch of per-model request counts and input/output token counts on the
+    /// current local day with a single save.
+    func record(requests: [String: Int], inputTokens: [String: Int], outputTokens: [String: Int], on date: Date = Date()) {
+        let models = Set(requests.keys).union(inputTokens.keys).union(outputTokens.keys)
         guard !models.isEmpty else { return }
         let key = Self.dayKey(date)
         for model in models {
             var stat = days[key]?[model] ?? Stat()
+            let inTok = max(0, inputTokens[model] ?? 0)
+            let outTok = max(0, outputTokens[model] ?? 0)
             stat.requests += max(0, requests[model] ?? 0)
-            stat.tokens += max(0, tokens[model] ?? 0)
+            stat.inputTokens += inTok
+            stat.outputTokens += outTok
+            stat.tokens += inTok + outTok
             days[key, default: [:]][model] = stat
         }
         save()
@@ -93,6 +122,36 @@ final class ActivityStore: ObservableObject {
 
     /// Number of distinct days with at least one recorded model.
     var activeDays: Int { days.values.filter { !$0.isEmpty }.count }
+
+    // MARK: Cost aggregates (USD, derived from token split × ModelPricing)
+
+    private func cost(_ model: String, _ stat: Stat) -> Double {
+        ModelPricing.cost(model: model, inputTokens: stat.inputTokens, outputTokens: stat.outputTokens)
+    }
+
+    /// Estimated equivalent API cost (USD) across all history.
+    func costTotal() -> Double {
+        days.values.reduce(0) { acc, byModel in
+            acc + byModel.reduce(0) { $0 + cost($1.key, $1.value) }
+        }
+    }
+
+    /// Estimated cost for a given local day.
+    func cost(on date: Date) -> Double {
+        (days[Self.dayKey(date)]?.reduce(0) { $0 + cost($1.key, $1.value) }) ?? 0
+    }
+
+    /// Today's estimated cost.
+    func costToday() -> Double { cost(on: Date()) }
+
+    /// Per-model cost totals (USD), highest first.
+    func modelCostTotals() -> [(model: String, cost: Double)] {
+        var totals: [String: Double] = [:]
+        for byModel in days.values {
+            for (model, stat) in byModel { totals[model, default: 0] += cost(model, stat) }
+        }
+        return totals.sorted { $0.value > $1.value }.map { (model: $0.key, cost: $0.value) }
+    }
 
     // MARK: Persistence
 

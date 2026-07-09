@@ -15,8 +15,9 @@ actor ProxyEngine {
     /// Per-model request counts accumulated since the last drain. AppState polls and
     /// clears this to feed the persisted ActivityStore, keeping recording off the hot path.
     private var pendingModelCounts: [String: Int] = [:]
-    /// Per-model token counts (from upstream `usage`) since the last drain.
-    private var pendingModelTokens: [String: Int] = [:]
+    /// Per-model input/output token counts (from upstream `usage`) since the last drain.
+    private var pendingModelInput: [String: Int] = [:]
+    private var pendingModelOutput: [String: Int] = [:]
 
     init(upstream: CopilotUpstream, snapshot: Snapshot) {
         self.upstream = upstream
@@ -27,13 +28,15 @@ actor ProxyEngine {
 
     func stats() -> (count: Int, lastError: String?) { (requestCount, lastError) }
 
-    /// Returns per-model request + token counts since the last call and resets buffers.
-    func drainModelStats() -> (requests: [String: Int], tokens: [String: Int]) {
+    /// Returns per-model request + input/output token counts since the last call and
+    /// resets buffers.
+    func drainModelStats() -> (requests: [String: Int], input: [String: Int], output: [String: Int]) {
         defer {
             pendingModelCounts.removeAll(keepingCapacity: true)
-            pendingModelTokens.removeAll(keepingCapacity: true)
+            pendingModelInput.removeAll(keepingCapacity: true)
+            pendingModelOutput.removeAll(keepingCapacity: true)
         }
-        return (pendingModelCounts, pendingModelTokens)
+        return (pendingModelCounts, pendingModelInput, pendingModelOutput)
     }
 
     /// Records one served request against its resolved model.
@@ -42,38 +45,38 @@ actor ProxyEngine {
         pendingModelCounts[model, default: 0] += 1
     }
 
-    /// Adds observed upstream token usage to the resolved model.
-    private func tallyTokens(_ model: String, _ tokens: Int) {
-        guard tokens > 0 else { return }
-        pendingModelTokens[model, default: 0] += tokens
+    /// Adds observed upstream token usage (split) to the resolved model.
+    private func tallyUsage(_ model: String, input: Int, output: Int) {
+        if input > 0 { pendingModelInput[model, default: 0] += input }
+        if output > 0 { pendingModelOutput[model, default: 0] += output }
     }
 
     // MARK: Usage extraction (pure, unit-testable)
 
-    /// Extracts total token usage from a full (non-stream) OpenAI/Anthropic JSON body.
-    static func extractUsageTokens(fromJSON data: Data) -> Int? {
+    /// Extracts (input, output) token usage from a full (non-stream) JSON body.
+    static func extractUsage(fromJSON data: Data) -> (input: Int, output: Int)? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        return usageTokens(obj["usage"])
+        return usageSplit(obj["usage"])
     }
 
-    /// Extracts token usage from a single SSE `data:` frame payload (JSON string).
-    static func extractUsageTokens(fromFramePayload payload: String) -> Int? {
+    /// Extracts (input, output) token usage from a single SSE `data:` frame payload.
+    static func extractUsage(fromFramePayload payload: String) -> (input: Int, output: Int)? {
         guard let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { return nil }
-        // OpenAI puts usage at the top level; Anthropic message_start nests it under "message".
-        if let t = usageTokens(obj["usage"]) { return t }
-        if let msg = obj["message"] as? [String: Any] { return usageTokens(msg["usage"]) }
+        if let s = usageSplit(obj["usage"]) { return s }
+        if let msg = obj["message"] as? [String: Any] { return usageSplit(msg["usage"]) }
         return nil
     }
 
-    /// Reads a `usage` object: prefer OpenAI `total_tokens`, else sum Anthropic
-    /// input_tokens + output_tokens.
-    private static func usageTokens(_ raw: Any?) -> Int? {
+    /// Reads a `usage` object into (input, output). Handles OpenAI
+    /// (prompt_tokens/completion_tokens) and Anthropic (input_tokens/output_tokens). If
+    /// only `total_tokens` is present, attributes it all to output (documented fallback).
+    private static func usageSplit(_ raw: Any?) -> (input: Int, output: Int)? {
         guard let usage = raw as? [String: Any] else { return nil }
-        if let total = usage["total_tokens"] as? Int { return total }
         let input = usage["input_tokens"] as? Int ?? usage["prompt_tokens"] as? Int ?? 0
         let output = usage["output_tokens"] as? Int ?? usage["completion_tokens"] as? Int ?? 0
-        let sum = input + output
-        return sum > 0 ? sum : nil
+        if input > 0 || output > 0 { return (input, output) }
+        if let total = usage["total_tokens"] as? Int, total > 0 { return (0, total) }
+        return nil
     }
 
     // MARK: Model resolution
@@ -219,26 +222,26 @@ actor ProxyEngine {
                         // SSE frame, so clients (Codex) never see `response.completed`
                         // and report "stream closed before response.completed".
                         var buffer = Data()
-                        var observedTokens = 0
+                        var obsIn = 0, obsOut = 0
                         do {
                             for try await byte in resp.bytes {
                                 buffer.append(byte)
                                 if byte == 0x0A {
                                     await writer.write(buffer)
-                                    if let t = Self.sniffUsage(inLine: buffer) { observedTokens = max(observedTokens, t) }
+                                    if let u = Self.sniffUsage(inLine: buffer) { obsIn = max(obsIn, u.input); obsOut = max(obsOut, u.output) }
                                     buffer.removeAll(keepingCapacity: true)
                                 }
                             }
                         } catch {}
                         if !buffer.isEmpty {
                             await writer.write(buffer)
-                            if let t = Self.sniffUsage(inLine: buffer) { observedTokens = max(observedTokens, t) }
+                            if let u = Self.sniffUsage(inLine: buffer) { obsIn = max(obsIn, u.input); obsOut = max(obsOut, u.output) }
                         }
-                        if observedTokens > 0 { await self.tallyTokens(model, observedTokens) }
+                        if obsIn > 0 || obsOut > 0 { await self.tallyUsage(model, input: obsIn, output: obsOut) }
                     })
             } else {
                 let data = await collect(resp.bytes)
-                if let t = Self.extractUsageTokens(fromJSON: data) { tallyTokens(model, t) }
+                if let u = Self.extractUsage(fromJSON: data) { tallyUsage(model, input: u.input, output: u.output) }
                 return HTTPServer.Response(status: 200,
                                           headers: ["Content-Type": resp.contentType],
                                           body: data, stream: nil)
@@ -251,12 +254,12 @@ actor ProxyEngine {
 
     /// Cheap per-line usage sniff for SSE forwarding: only parses lines that look like a
     /// `data:` frame containing the substring `usage`, so the hot path stays fast.
-    private static func sniffUsage(inLine data: Data) -> Int? {
+    private static func sniffUsage(inLine data: Data) -> (input: Int, output: Int)? {
         guard let line = String(data: data, encoding: .utf8) else { return nil }
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("data:"), trimmed.contains("usage") else { return nil }
         let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
-        return extractUsageTokens(fromFramePayload: payload)
+        return extractUsage(fromFramePayload: payload)
     }
 
     // MARK: Anthropic messages (Claude Code) -> OpenAI chat translation
@@ -299,7 +302,7 @@ actor ProxyEngine {
                 return anthropicStream(resp: resp, model: model)
             } else {
                 let data = await collect(resp.bytes)
-                if let t = Self.extractUsageTokens(fromJSON: data) { tallyTokens(model, t) }
+                if let u = Self.extractUsage(fromJSON: data) { tallyUsage(model, input: u.input, output: u.output) }
                 let openai = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
                 let translated = AnthropicTranslate.fromOpenAI(openai, model: model)
                 return .json(200, translated)
@@ -320,7 +323,7 @@ actor ProxyEngine {
                 await writer.write(enc.start())
                 // Anthropic clients expect a ping soon after start.
                 await writer.write(AnthropicStreamEncoder.event("ping", ["type": "ping"]))
-                var observedTokens = 0
+                var obsIn = 0, obsOut = 0
                 do {
                     for try await line in resp.bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
@@ -328,7 +331,7 @@ actor ProxyEngine {
                         if payload == "[DONE]" { break }
                         guard let obj = try? JSONSerialization.jsonObject(
                             with: Data(payload.utf8)) as? [String: Any] else { continue }
-                        if let t = Self.extractUsageTokens(fromFramePayload: payload) { observedTokens = max(observedTokens, t) }
+                        if let u = Self.extractUsage(fromFramePayload: payload) { obsIn = max(obsIn, u.input); obsOut = max(obsOut, u.output) }
                         let chunk = enc.handle(obj)
                         if !chunk.isEmpty { await writer.write(chunk) }
                     }
@@ -336,7 +339,7 @@ actor ProxyEngine {
                     // fall through to finish
                 }
                 await writer.write(enc.finish())
-                if observedTokens > 0 { await self.tallyTokens(model, observedTokens) }
+                if obsIn > 0 || obsOut > 0 { await self.tallyUsage(model, input: obsIn, output: obsOut) }
             })
     }
 
