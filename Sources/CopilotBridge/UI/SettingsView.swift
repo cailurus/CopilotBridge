@@ -359,9 +359,10 @@ struct AboutView: View {
                 Button("Check again") { state.checkForUpdates() }
                     .buttonStyle(.link).font(.caption)
             }
-        case .failed:
-            HStack(spacing: 6) {
-                Text("Couldn't check for updates.").font(.caption).foregroundStyle(.secondary)
+        case .failed(let message):
+            VStack(spacing: 4) {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
                 Button("Retry") { state.checkForUpdates() }
                     .buttonStyle(.link).font(.caption)
             }

@@ -63,8 +63,8 @@ mkdir -p "$DIST"
 ZIP_APP="$DIST/CopilotBridge-$VERSION-app.zip"
 DMG="$DIST/CopilotBridge-$VERSION.dmg"
 
-echo "==> 1) Build app"
-"$BUILD_SCRIPT" release
+echo "==> 1) Build app (stamping version $VERSION into Info.plist)"
+"$BUILD_SCRIPT" release "$VERSION"
 
 if [[ ! -d "$APP" ]]; then
   echo "App bundle not found after build: $APP" >&2

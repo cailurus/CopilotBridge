@@ -47,3 +47,27 @@ import Testing
 @Test func parseLatestRejectsGarbage() {
     #expect(UpdateChecker.parseLatest(Data("not json".utf8)) == nil)
 }
+
+@Test func statusForRateLimitIsFriendly() {
+    let body = Data(#"{"message":"API rate limit exceeded for 1.2.3.4."}"#.utf8)
+    let status = UpdateChecker.status(forHTTP: 403, body: body, currentVersion: "0.1.3")
+    guard case .failed(let msg) = status else {
+        Issue.record("expected .failed, got \(status)")
+        return
+    }
+    #expect(msg.lowercased().contains("rate limit"))
+}
+
+@Test func statusForOKComputesUpdate() {
+    let body = Data(#"{"tag_name":"v0.2.0","html_url":"https://x/y","assets":[]}"#.utf8)
+    #expect(UpdateChecker.status(forHTTP: 200, body: body, currentVersion: "0.1.3") == .available(version: "v0.2.0", url: "https://x/y"))
+    #expect(UpdateChecker.status(forHTTP: 200, body: body, currentVersion: "0.2.0") == .upToDate)
+}
+
+@Test func statusForOtherErrorIsGeneric() {
+    let status = UpdateChecker.status(forHTTP: 500, body: Data(), currentVersion: "0.1.3")
+    guard case .failed = status else {
+        Issue.record("expected .failed for 500")
+        return
+    }
+}

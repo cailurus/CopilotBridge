@@ -81,8 +81,10 @@ final class HTTPServer: @unchecked Sendable {
     private var connectionByID: [ObjectIdentifier: NWConnection] = [:]
 
     /// Cap on bytes buffered while still waiting for a complete request head+body, to
-    /// bound memory against a client that never finishes its request.
-    private static let maxRequestBytes = 1 << 20   // 1 MiB
+    /// bound memory against a client that never finishes its request. Sized generously
+    /// for LLM requests: a full large-context (up to ~1M-token) message body can be many
+    /// megabytes, so a small cap would reject legitimate requests with 413.
+    private static let maxRequestBytes = 64 << 20   // 64 MiB
     /// Idle deadline: if a full request isn't parsed within this window, drop the
     /// connection (defends against slowloris / half-open connections).
     private static let requestReadTimeout: TimeInterval = 30

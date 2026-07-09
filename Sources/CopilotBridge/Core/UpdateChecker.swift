@@ -56,6 +56,25 @@ enum UpdateChecker {
         return (tag, url)
     }
 
+    /// Maps an HTTP status + body to an UpdateStatus. Pure/unit-testable.
+    static func status(forHTTP code: Int, body: Data, currentVersion: String) -> UpdateStatus {
+        if code == 200 {
+            guard let parsed = parseLatest(body) else {
+                return .failed("Unexpected response from GitHub.")
+            }
+            return isNewer(parsed.tag, than: currentVersion)
+                ? .available(version: parsed.tag, url: parsed.downloadURL)
+                : .upToDate
+        }
+        // GitHub rate-limits unauthenticated requests (60/hour/IP). Surface that clearly
+        // instead of a generic failure so the user knows to just wait.
+        let message = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["message"] as? String ?? ""
+        if code == 403 || code == 429 || message.lowercased().contains("rate limit") {
+            return .failed("GitHub rate limit reached — try again later.")
+        }
+        return .failed("Update check failed (HTTP \(code)).")
+    }
+
     /// Fetches the latest release and compares it to `currentVersion`.
     static func check(currentVersion: String) async -> UpdateStatus {
         var req = URLRequest(url: latestReleaseURL, timeoutInterval: 8)
@@ -63,15 +82,8 @@ enum UpdateChecker {
         req.setValue("CopilotBridge", forHTTPHeaderField: "User-Agent")   // GitHub requires a UA
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-                return .failed("Update check failed (HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1))")
-            }
-            guard let parsed = parseLatest(data) else {
-                return .failed("Unexpected response from GitHub.")
-            }
-            return isNewer(parsed.tag, than: currentVersion)
-                ? .available(version: parsed.tag, url: parsed.downloadURL)
-                : .upToDate
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            return status(forHTTP: code, body: data, currentVersion: currentVersion)
         } catch {
             return .failed(error.localizedDescription)
         }
